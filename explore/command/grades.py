@@ -5,8 +5,8 @@
 # %% hra, vra and command
 import polars as pl
 import numpy as np
-from sklearn.linear_model import LinearRegression
 from sklearn.mixture import GaussianMixture
+from scipy.stats import gaussian_kde, rankdata
 import os
 os.chdir("C:/Users/dalto/OneDrive/Pictures/Documents/Projects/Coding Projects/Optimal Pitch/data/")
 df = (pl.scan_csv('cleaned_data/pitch_ft_2326.csv')
@@ -20,7 +20,7 @@ df = df.with_columns(
     ahead = pl.col('count').is_in(ahead_in_count)
 )
 
-# %% plotting pitch loc and intention
+# %% plot pitches, intended locations
 def plot_pitch_intent(pitch_data, targets):
     from matplotlib.patches import Rectangle
     import matplotlib.pyplot as plt
@@ -56,136 +56,70 @@ def plot_pitch_intent(pitch_data, targets):
     
     plt.tight_layout()
     plt.show()
-
-# %% vra, hra miss
-def vra_hra_miss(pitchers, pitches, b_stand, df=df):
-    # predicted vra and hra given location and release x and release height
-    lin_R = (df
-        .filter(pl.col('p_throws') == 'R')
-        .select(['plate_x', 'plate_z', 'release_x', 'release_height', 'vra', 'hra'])
-        .drop_nulls()
-    )
-    
-    X_train = lin_R.select(['plate_x', 'plate_z', 'release_x', 'release_height']).to_numpy()
-    vra_train = lin_R.select(['vra']).to_numpy()
-    hra_train = lin_R.select(['hra']).to_numpy()
-    # trained models
-    vra_model_R = LinearRegression().fit(X_train, vra_train)
-    hra_model_R = LinearRegression().fit(X_train, hra_train)
-
-    # batch filter all data
+# %% intended target
+def intended_target(pitchers, pitches, df=df):
+    # filter valid pitches
     cohort = df.filter(
         (pl.col('pitcher_name').is_in(pitchers)) & 
         (pl.col('pitch_name').is_in(pitches)) &
-        (pl.col('game_year') == 2025) &
-        (pl.col('b_stand') == b_stand) &
-        (pl.col('ahead'))
+        (pl.col('game_year') == 2025)
     )
-
+    # looping through
     misses_accumulator = []
-
-    # loop through pitchers and pitches
-    for keys, indiv_pitch in cohort.group_by(['pitcher_name', 'pitch_name']):
-        current_pitcher, current_pitch = keys
-        
-        # skip if less than 50, only 5 misses
+    for keys, indiv_pitch in cohort.group_by(['pitcher_name', 'pitch_name', 'b_stand', 'ahead']):
+        # pitch count
         if len(indiv_pitch) < 50: 
             continue
-        # all pitch locations
+        # location of pitches
         indiv_loc = indiv_pitch.select(['plate_x', 'plate_z']).to_numpy()
-        # fit gmm
-        gmm = GaussianMixture(n_components=2, covariance_type='full', random_state=26)
+        
+        # gmm to find intended location
+        gmm = GaussianMixture(n_components=3, covariance_type='full', random_state=26)
         gmm.fit(indiv_loc)
-        intended_locations = gmm.means_
+        probs = gmm.predict_proba(indiv_loc) # Shape (N, 3)
         
-        # misses
-        scores = gmm.score_samples(indiv_loc)
-        threshold = np.percentile(scores, 100) # take 20% biggest misses
+        # most likley canadiate
+        predicted_components = np.argmax(probs, axis=1)
+        confidence = np.max(probs, axis=1)
         
-        # filter only for outliers
-        is_outlier = scores < threshold
+        # means and cov of predicted value
+        means = gmm.means_[predicted_components]      
+        covs = gmm.covariances_[predicted_components]
         
-        if not np.any(is_outlier):
-            raise Exception()
-        # only keep large misses
-        pitch_misses = indiv_pitch.filter(pl.lit(is_outlier))
-
-        # find closest target
-        miss_coords = pitch_misses.select(['plate_x', 'plate_z']).to_numpy()
-        diffs = miss_coords[:, np.newaxis, :] - intended_locations
-        dists = np.linalg.norm(diffs, axis=2)
-        closest_indices = np.argmin(dists, axis=1)
-        closest_means = intended_locations[closest_indices]
+        # statistical distance from mean
+        diffs = indiv_loc - means 
+        inv_covs = np.linalg.inv(covs) 
+        mahal_sq = np.einsum('ij,ijk,ik->i', diffs, inv_covs, diffs)
+        mahal_dist = np.sqrt(mahal_sq)
         
-        # assumed target for misses
+        # distance by confidence
+        weighted_penalty = mahal_sq * confidence
+        
+        # return all pitches
+        is_valid = mahal_dist > -1 
+        
+        # pitches and cluster
+        pitch_misses = indiv_pitch.filter(pl.lit(is_valid))
         pitch_misses = pitch_misses.with_columns(
-            pl.Series("target_x", closest_means[:, 0]),
-            pl.Series("target_z", closest_means[:, 1])
+            pl.Series("target_x", means[is_valid, 0]), # predicted location
+            pl.Series("target_z", means[is_valid, 1]), 
+            pl.Series("target_confidence", confidence[is_valid]), # confidence it belongs to cluster
+            pl.Series("mahalanobis_sq", mahal_sq[is_valid]), # distance 
+            pl.Series("weighted_pen", weighted_penalty[is_valid]) # weight
         )
-        
+
         misses_accumulator.append(pitch_misses)
 
-    # combine all missed pitches
     all_misses = pl.concat(misses_accumulator)
-    
-    # preds based on trageted location
-    X_pred = all_misses.select(['target_x', 'target_z', 'release_x', 'release_height']).to_numpy()
-    
-    # predict
-    target_vras = vra_model_R.predict(X_pred).flatten()
-    target_hras = hra_model_R.predict(X_pred).flatten()
-    
-    # diffs and output
-    final_results = (all_misses
-        .with_columns(
-            pl.Series("target_vra", target_vras),
-            pl.Series("target_hra", target_hras)
-        )
-        .with_columns(
-            (pl.col('vra') - pl.col('target_vra')).abs().alias('vra_miss'),
-            (pl.col('hra') - pl.col('target_hra')).abs().alias('hra_miss')
-        )
-        .group_by(['pitcher_name', 'pitch_name'])
-        .agg(
-            pl.col('vra_miss').mean().alias('avg_vra_miss'),
-            pl.col('hra_miss').mean().alias('avg_hra_miss'),
-            pl.len().alias('miss_count')
-        )
-        .sort('pitcher_name')
-    )
+    return all_misses
 
-    return final_results
+# %% command
+pitchers = df['pitcher_name'].unique()
+pitches = df['pitch_name'].unique()
+command = intended_target(pitchers, pitches)
 
-# %% location x miss
-
-# %% command grades 
-pitchers = (df
-    .filter(pl.col('p_throws') == 'R')
-    .filter(pl.col('game_year') > 2024)
-    .filter(pl.len().over('pitcher_id') > 1000)
+# %% extracting command value
+avg = command.group_by(['pitcher_name', 'pitch_name']).agg(
+    pl.col(['weighted_pen']).sum() / pl.len()
 )
-
-pitcher_name = pitchers['pitcher_name'].unique().to_list()
-pitch_type =  pitchers['pitch_name'].unique().to_list()
-# simple vra and hra miss
-command_grades = vra_hra_miss(pitchers=pitcher_name, pitches=pitch_type, b_stand='R')
-
-# adj grades based on averages
-final_grades = (command_grades
-    # avg miss for each pitch
-    .with_columns(
-        pl.col('avg_vra_miss').mean().over('pitch_name').alias('league_avg_vra'),
-        pl.col('avg_hra_miss').mean().over('pitch_name').alias('league_avg_hra')
-    )
-    # abv avg
-    .with_columns(
-        (pl.col('league_avg_vra') - pl.col('avg_vra_miss')).alias('vra_aa'),
-        (pl.col('league_avg_hra') - pl.col('avg_hra_miss')).alias('hra_aa')
-    )
-    # simple sum of command
-    .with_columns(
-        (pl.col('vra_aa') + pl.col('hra_aa')).alias('composite_score')
-    )
-    .sort('composite_score', descending=True) 
-)
-final_grades.write_csv('grades.csv')
+avg.write_csv('ind.csv')
