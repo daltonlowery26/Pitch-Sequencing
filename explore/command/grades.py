@@ -2,16 +2,17 @@
 # individual targets. based on the situation can we find an estimate of the location they are trying to hit
 # or at least some probablity they are trying to hit a location. can we then find how often they deviate from that 
 # location. 
+
 # %% hra, vra and command
 import polars as pl
 import numpy as np
+from scipy.stats import chi2
 from sklearn.mixture import GaussianMixture
-from scipy.stats import gaussian_kde, rankdata
 import os
 os.chdir("C:/Users/dalto/OneDrive/Pictures/Documents/Projects/Coding Projects/Optimal Pitch/data/")
 df = (pl.scan_csv('cleaned_data/pitch_ft_2326.csv')
     .select(['pitcher_name', 'pitcher_id', 'game_year', 'b_stand', 'count', 'release_height', 'release_x',
-        'arm_angle','p_throws', 'plate_x', 'plate_z', 'hra', 'vra', 'pitch_name'])
+        'arm_angle', 'release_extension','p_throws', 'plate_x', 'plate_z', 'hra', 'vra', 'pitch_name'])
     .drop_nulls(subset=['hra', 'vra'])
 ).collect(engine="streaming")
 # is a pitcher ahead or behind in the count 
@@ -55,71 +56,107 @@ def plot_pitch_intent(pitch_data, targets):
     ax.grid(True, linestyle=':', alpha=0.5)
     
     plt.tight_layout()
-    plt.show()
+    plt.show() 
+
 # %% intended target
-def intended_target(pitchers, pitches, df=df):
+def bio_mechanical_variance(pitchers, pitches, df=df):
+    # intended target cols
+    feature_cols = ['release_x', 'release_height', 'vra', 'hra']
+    
     # filter valid pitches
     cohort = df.filter(
         (pl.col('pitcher_name').is_in(pitchers)) & 
         (pl.col('pitch_name').is_in(pitches)) &
-        (pl.col('game_year') == 2025)
-    )
-    # looping through
+        (pl.col('game_year') > 2025)
+    ).drop_nulls(subset=feature_cols)
+    
+    cov_lookup = {}
+    for keys, group in cohort.group_by(['p_throws', 'pitch_name', 'b_stand']):
+        hand, pitch_type, b_stand = keys
+        # data 
+        data_matrix = group.select(feature_cols).to_numpy()
+        # create covariance matrix
+        cov_matrix = np.cov(data_matrix, rowvar=False)
+        inv_cov = np.linalg.inv(cov_matrix)
+        cov_lookup[(hand, pitch_type, b_stand)] = inv_cov
+    
+    # throws
+    p_throws_df = cohort.select(['pitcher_name', 'p_throws']).unique(subset=['pitcher_name'], keep='first')
+    p_throws = dict(zip(p_throws_df['pitcher_name'], p_throws_df['p_throws']))
+    
     misses_accumulator = []
-    for keys, indiv_pitch in cohort.group_by(['pitcher_name', 'pitch_name', 'b_stand', 'ahead']):
-        # pitch count
-        if len(indiv_pitch) < 50: 
+    
+    # looping through
+    for keys, indiv_pitch in cohort.group_by(['pitcher_name', 'pitch_name', 'b_stand']):
+        name, pitch_type, b_stand, _ = keys
+        if len(indiv_pitch) < 10: 
             continue
-        # location of pitches
-        indiv_loc = indiv_pitch.select(['plate_x', 'plate_z']).to_numpy()
+            
+        # fit gmm on biomecchanical
+        joint_data = indiv_pitch.select(feature_cols).to_numpy()
         
-        # gmm to find intended location
-        gmm = GaussianMixture(n_components=3, covariance_type='full', random_state=26)
-        gmm.fit(indiv_loc)
-        probs = gmm.predict_proba(indiv_loc) # Shape (N, 3)
+        # git gmm on joint space, learn covariance matrix
+        gmm = GaussianMixture(n_components=1, covariance_type='full', random_state=26)
+        gmm.fit(joint_data)
         
-        # most likley canadiate
+        # which cluster does a pitch belong too
+        probs = gmm.predict_proba(joint_data) 
         predicted_components = np.argmax(probs, axis=1)
         confidence = np.max(probs, axis=1)
         
-        # means and cov of predicted value
-        means = gmm.means_[predicted_components]      
-        covs = gmm.covariances_[predicted_components]
+        # mean and covar for a cluster
+        assigned_means = gmm.means_[predicted_components] 
         
-        # statistical distance from mean
-        diffs = indiv_loc - means 
-        inv_covs = np.linalg.inv(covs) 
-        mahal_sq = np.einsum('ij,ijk,ik->i', diffs, inv_covs, diffs)
+        # get inverse vector based on p_throws and pitch type
+        throws = p_throws.get(name)
+        inv_covs = cov_lookup.get((throws, pitch_type, b_stand))
+
+        # mahoabalhis dist
+        weights = np.array([.36648363, .23062016, .46066925, .48497144])   
+        diff = (joint_data - assigned_means) * weights
+        mahal_sq = np.einsum('ij,jk,ik->i', diff, inv_covs, diff)
         mahal_dist = np.sqrt(mahal_sq)
         
-        # distance by confidence
-        weighted_penalty = mahal_sq * confidence
+        # 0-1 usi chi sqaured
+        prob_metric = chi2.sf(mahal_sq, df=len(feature_cols))
         
-        # return all pitches
-        is_valid = mahal_dist > -1 
-        
-        # pitches and cluster
-        pitch_misses = indiv_pitch.filter(pl.lit(is_valid))
-        pitch_misses = pitch_misses.with_columns(
-            pl.Series("target_x", means[is_valid, 0]), # predicted location
-            pl.Series("target_z", means[is_valid, 1]), 
-            pl.Series("target_confidence", confidence[is_valid]), # confidence it belongs to cluster
-            pl.Series("mahalanobis_sq", mahal_sq[is_valid]), # distance 
-            pl.Series("weighted_pen", weighted_penalty[is_valid]) # weight
+        # dist
+        pitch_misses = indiv_pitch.with_columns(
+            pl.Series("target_confidence", confidence),
+            pl.Series("joint_mahal_dist", mahal_dist),  
+            pl.Series("command_score", prob_metric)    
         )
 
         misses_accumulator.append(pitch_misses)
-
+        
     all_misses = pl.concat(misses_accumulator)
     return all_misses
-
 # %% command
 pitchers = df['pitcher_name'].unique()
 pitches = df['pitch_name'].unique()
-command = intended_target(pitchers, pitches)
+command = bio_mechanical_variance(pitchers, pitches)
 
 # %% extracting command value
 avg = command.group_by(['pitcher_name', 'pitch_name']).agg(
-    pl.col(['weighted_pen']).sum() / pl.len()
+    (pl.col(['command_score']).sum() / pl.len()).alias('avg_command'),
+    (pl.col(['command_score']).std()).alias('std_command'),
+    pl.len().alias('count')
 )
-avg.write_csv('ind.csv')
+
+# %% pitch value
+pitch_grades = (pl.scan_csv('raw_data/indiv_pitch_value25.csv')
+                .select(['pitch_name', 'last_name, first_name', 'run_value_per_100', 'est_woba'])
+).collect(engine="streaming")
+avg = avg.join(pitch_grades, right_on=['last_name, first_name', 'pitch_name'], left_on=['pitcher_name', 'pitch_name'], how='left')
+
+# %% correlations
+correlation = (avg
+                .filter(pl.col('pitch_name') == '4-Seam Fastball')
+                .filter(pl.col('count') > 400)
+                .select(pl.corr("avg_command", "run_value_per_100")))
+print(correlation.item())
+correlation = (avg
+                .filter(pl.col('pitch_name') == 'Sinker')
+                .filter(pl.col('count') > 50)
+                .select(pl.corr("std_command", "avg_command")))
+print(correlation.item())
