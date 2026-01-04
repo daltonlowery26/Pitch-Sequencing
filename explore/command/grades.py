@@ -1,25 +1,39 @@
-# pitcher try to hit a few targets with each pitch, can we measure the varbility of when they try to hit
-# individual targets. based on the situation can we find an estimate of the location they are trying to hit
-# or at least some probablity they are trying to hit a location. can we then find how often they deviate from that 
-# location. 
-
 # %% hra, vra and command
 import polars as pl
 import numpy as np
 from scipy.stats import chi2
 from sklearn.mixture import GaussianMixture
+from sklearn.decomposition import PCA
+from sklearn.preprocessing import StandardScaler
 import os
 os.chdir("C:/Users/dalto/OneDrive/Pictures/Documents/Projects/Coding Projects/Optimal Pitch/data/")
 df = (pl.scan_csv('cleaned_data/pitch_ft_2326.csv')
     .select(['pitcher_name', 'pitcher_id', 'game_year', 'b_stand', 'count', 'release_height', 'release_x',
         'arm_angle', 'release_extension','p_throws', 'plate_x', 'plate_z', 'hra', 'vra', 'pitch_name'])
-    .drop_nulls(subset=['hra', 'vra'])
+    .drop_nulls(subset=['hra', 'vra', 'arm_angle'])
 ).collect(engine="streaming")
+
 # is a pitcher ahead or behind in the count 
 ahead_in_count = ['0-1', '0-2', '1-2', '2-2']
 df = df.with_columns(
     ahead = pl.col('count').is_in(ahead_in_count)
 )
+
+# arm angle buckets
+avg_arm = df.group_by(['pitcher_name', 'pitch_name', 'game_year']).agg(
+    aa = pl.col("arm_angle").mean()
+)
+# based on knn clustering
+boundaries = [-65.33636371, 10.33327117, 27.56592316, 
+                38.37378127, 48.78640247, 76.30000005]
+breaks = boundaries[1:-1]
+labels = [str(i) for i in range(1, len(boundaries))]
+avg_arm = avg_arm.with_columns(
+    arm_angle_bucket = pl.col("aa").cut(breaks, labels=labels).cast(pl.Int64)
+)
+avg_arm = avg_arm.select(pl.col(['pitcher_name', 'pitch_name', 'game_year', 'arm_angle_bucket']))
+# join 
+df = df.join(avg_arm, on=['pitcher_name', 'pitch_name', 'game_year'], how='left')
 
 # %% plot pitches, intended locations
 def plot_pitch_intent(pitch_data, targets):
@@ -66,19 +80,20 @@ def bio_mechanical_variance(pitchers, pitches, df=df):
     # filter valid pitches
     cohort = df.filter(
         (pl.col('pitcher_name').is_in(pitchers)) & 
-        (pl.col('pitch_name').is_in(pitches)) &
-        (pl.col('game_year') > 2025)
+        (pl.col('pitch_name').is_in(pitches))
     ).drop_nulls(subset=feature_cols)
     
     cov_lookup = {}
-    for keys, group in cohort.group_by(['p_throws', 'pitch_name', 'b_stand']):
-        hand, pitch_type, b_stand = keys
+    for keys, group in cohort.group_by(['p_throws', 'pitch_name', 'b_stand', 'game_year']):
+        if len(group) < 2: 
+            continue
+        hand, pitch_type, b_stand, year = keys
         # data 
         data_matrix = group.select(feature_cols).to_numpy()
         # create covariance matrix
         cov_matrix = np.cov(data_matrix, rowvar=False)
-        inv_cov = np.linalg.inv(cov_matrix)
-        cov_lookup[(hand, pitch_type, b_stand)] = inv_cov
+        inv_cov = np.linalg.pinv(cov_matrix)
+        cov_lookup[(hand, pitch_type, b_stand, year)] = inv_cov
     
     # throws
     p_throws_df = cohort.select(['pitcher_name', 'p_throws']).unique(subset=['pitcher_name'], keep='first')
@@ -87,9 +102,9 @@ def bio_mechanical_variance(pitchers, pitches, df=df):
     misses_accumulator = []
     
     # looping through
-    for keys, indiv_pitch in cohort.group_by(['pitcher_name', 'pitch_name', 'b_stand']):
-        name, pitch_type, b_stand, _ = keys
-        if len(indiv_pitch) < 10: 
+    for keys, indiv_pitch in cohort.group_by(['pitcher_name', 'pitch_name', 'b_stand', 'game_year']):
+        name, pitch_type, b_stand, year = keys
+        if len(indiv_pitch) < 2: 
             continue
             
         # fit gmm on biomecchanical
@@ -109,7 +124,7 @@ def bio_mechanical_variance(pitchers, pitches, df=df):
         
         # get inverse vector based on p_throws and pitch type
         throws = p_throws.get(name)
-        inv_covs = cov_lookup.get((throws, pitch_type, b_stand))
+        inv_covs = cov_lookup.get((throws, pitch_type, b_stand, year))
 
         # mahoabalhis dist
         weights = np.array([.36648363, .23062016, .46066925, .48497144])   
@@ -131,32 +146,65 @@ def bio_mechanical_variance(pitchers, pitches, df=df):
         
     all_misses = pl.concat(misses_accumulator)
     return all_misses
+
 # %% command
 pitchers = df['pitcher_name'].unique()
 pitches = df['pitch_name'].unique()
 command = bio_mechanical_variance(pitchers, pitches)
 
 # %% extracting command value
-avg = command.group_by(['pitcher_name', 'pitch_name']).agg(
-    (pl.col(['command_score']).sum() / pl.len()).alias('avg_command'),
-    (pl.col(['command_score']).std()).alias('std_command'),
+avg = command.group_by(['pitcher_id', 'pitcher_name', 'pitch_name', 'game_year']).agg(
+    pl.col('command_score').mean().alias('avg_command'),
+    pl.col('command_score').std().alias('std_command'),
     pl.len().alias('count')
 )
+avg.write_csv('cmd_grades.csv')
+avg = avg.filter(pl.col('game_year') == 2025).filter(pl.col('count') > 100)
+# %% year over year stability
+yoy_stability = (
+    avg.join(
+        avg.with_columns((pl.col('game_year') + 1).alias('next_year')),
+        left_on=['pitcher_id', 'pitch_name', 'game_year'],
+        right_on=['pitcher_id', 'pitch_name', 'next_year'],
+        suffix='_prev'
+    )
+    .group_by('pitch_name')
+    .agg(
+        pl.corr('avg_command', 'avg_command_prev').alias('yoy_correlation'),
+        pl.len().alias('pair_count')
+    )
+)
+print(yoy_stability)
 
 # %% pitch value
-pitch_grades = (pl.scan_csv('raw_data/indiv_pitch_value25.csv')
-                .select(['pitch_name', 'last_name, first_name', 'run_value_per_100', 'est_woba'])
-).collect(engine="streaming")
-avg = avg.join(pitch_grades, right_on=['last_name, first_name', 'pitch_name'], left_on=['pitcher_name', 'pitch_name'], how='left')
+pitch_grades = pl.read_csv('raw_data/pitch_values.csv')
+cmd_stats = pl.read_csv('raw_data/bot_cmd.csv')
+avg = avg.join(pitch_grades, right_on=['MLBAMID'], left_on=['pitcher_id'], how='left')
+avg = avg.join(cmd_stats, right_on=['MLBAMID'], left_on=['pitcher_id'], how='left')
+print(avg.columns)
+# %% std and avg combined
+# pca
+scaler = StandardScaler()
+X_scaled = scaler.fit_transform(avg[['avg_command', 'std_command']])
 
+# pca to combine metrics to one laten space
+pca = PCA(n_components=1)
+pc1 = pca.fit_transform(X_scaled)
+
+# weights and explained var
+weights = pca.components_[0]
+explained_var = pca.explained_variance_ratio_[0]
+print(weights)
+avg = avg.with_columns(
+    combined = (0.707 * pl.col("avg_command")) + (-0.707 * pl.col("std_command"))
+)
 # %% correlations
-correlation = (avg
-                .filter(pl.col('pitch_name') == '4-Seam Fastball')
-                .filter(pl.col('count') > 400)
-                .select(pl.corr("avg_command", "run_value_per_100")))
-print(correlation.item())
-correlation = (avg
-                .filter(pl.col('pitch_name') == 'Sinker')
-                .filter(pl.col('count') > 50)
-                .select(pl.corr("std_command", "avg_command")))
-print(correlation.item())
+command = ['avg_command', 'botCmd FA', 'wFA/C']
+correlation_df = (avg
+    .filter(pl.col('pitch_name') == '4-Seam Fastball')
+    .select([pl.corr("avg_command", col).alias(col) 
+        for col in command])
+)
+print(correlation_df)
+
+
