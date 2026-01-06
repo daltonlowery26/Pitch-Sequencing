@@ -84,16 +84,16 @@ def bio_mechanical_variance(pitchers, pitches, df=df):
     ).drop_nulls(subset=feature_cols)
     
     cov_lookup = {}
-    for keys, group in cohort.group_by(['p_throws', 'pitch_name', 'b_stand', 'game_year']):
+    for keys, group in cohort.group_by(['p_throws', 'pitch_name', 'b_stand', 'game_year', 'arm_angle_bucket']):
         if len(group) < 2: 
             continue
-        hand, pitch_type, b_stand, year = keys
+        hand, pitch_type, b_stand, year, aa = keys
         # data 
         data_matrix = group.select(feature_cols).to_numpy()
         # create covariance matrix
         cov_matrix = np.cov(data_matrix, rowvar=False)
         inv_cov = np.linalg.pinv(cov_matrix)
-        cov_lookup[(hand, pitch_type, b_stand, year)] = inv_cov
+        cov_lookup[(hand, pitch_type, b_stand, year, aa)] = inv_cov
     
     # throws
     p_throws_df = cohort.select(['pitcher_name', 'p_throws']).unique(subset=['pitcher_name'], keep='first')
@@ -102,8 +102,8 @@ def bio_mechanical_variance(pitchers, pitches, df=df):
     misses_accumulator = []
     
     # looping through
-    for keys, indiv_pitch in cohort.group_by(['pitcher_name', 'pitch_name', 'b_stand', 'game_year']):
-        name, pitch_type, b_stand, year = keys
+    for keys, indiv_pitch in cohort.group_by(['pitcher_name', 'pitch_name', 'b_stand', 'game_year', 'arm_angle_bucket']):
+        name, pitch_type, b_stand, year, aa = keys
         if len(indiv_pitch) < 2: 
             continue
             
@@ -124,7 +124,7 @@ def bio_mechanical_variance(pitchers, pitches, df=df):
         
         # get inverse vector based on p_throws and pitch type
         throws = p_throws.get(name)
-        inv_covs = cov_lookup.get((throws, pitch_type, b_stand, year))
+        inv_covs = cov_lookup.get((throws, pitch_type, b_stand, year, aa))
 
         # mahoabalhis dist
         weights = np.array([.36648363, .23062016, .46066925, .48497144])   
@@ -158,7 +158,7 @@ avg = command.group_by(['pitcher_id', 'pitcher_name', 'pitch_name', 'game_year']
     pl.col('command_score').std().alias('std_command'),
     pl.len().alias('count')
 )
-avg.write_csv('cmd_grades.csv')
+avg.write_csv('cleaned_data/cmd_grades.csv')
 avg = avg.filter(pl.col('game_year') == 2025).filter(pl.col('count') > 100)
 # %% year over year stability
 yoy_stability = (
@@ -177,8 +177,8 @@ yoy_stability = (
 print(yoy_stability)
 
 # %% pitch value
-pitch_grades = pl.read_csv('raw_data/pitch_values.csv')
-cmd_stats = pl.read_csv('raw_data/bot_cmd.csv')
+pitch_grades = pl.read_csv('raw_data/cmd/pitch_values.csv')
+cmd_stats = pl.read_csv('raw_data/cmd/bot_cmd.csv')
 avg = avg.join(pitch_grades, right_on=['MLBAMID'], left_on=['pitcher_id'], how='left')
 avg = avg.join(cmd_stats, right_on=['MLBAMID'], left_on=['pitcher_id'], how='left')
 print(avg.columns)
@@ -199,10 +199,10 @@ avg = avg.with_columns(
     combined = (0.707 * pl.col("avg_command")) + (-0.707 * pl.col("std_command"))
 )
 # %% correlations
-command = ['avg_command', 'botCmd FA', 'wFA/C']
+command = ['avg_command', 'botCmd SL', 'wSL/C']
 correlation_df = (avg
-    .filter(pl.col('pitch_name') == '4-Seam Fastball')
-    .select([pl.corr("avg_command", col).alias(col) 
+    .filter(pl.col('pitch_name') == 'Slider')
+    .select([pl.corr('botCmd SL', col).alias(col) 
         for col in command])
 )
 print(correlation_df)

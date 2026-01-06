@@ -19,6 +19,7 @@ avg_arm.head()
 # %% plotting
 sns.kdeplot(avg_arm["aa"], fill=True)
 plt.show()
+
 # %% clustering into groups
 X = avg_arm["aa"].to_numpy().reshape(-1, 1)
 kmeans = KMeans(n_clusters=5, random_state=26, n_init=100)

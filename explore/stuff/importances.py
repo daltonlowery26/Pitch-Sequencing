@@ -1,23 +1,17 @@
-# find realtive importances of features for location
-# %% packages
+# %% importances of traits for run prevention
 import os
 import shap
 import numpy as np
+import matplotlib.pyplot as plt
 import polars as pl
 import xgboost as xgb
-from sklearn.metrics import root_mean_squared_error
+from sklearn.metrics import root_mean_squared_error, r2_score, mean_absolute_error
 from sklearn.model_selection import PredefinedSplit, RandomizedSearchCV, train_test_split
 os.chdir("C:/Users/dalto/OneDrive/Pictures/Documents/Projects/Coding Projects/Optimal Pitch/data/")
-df = (
-    pl.scan_csv("cleaned_data/pitch_ft_2326.csv").select(["vra", "hra", "release_x", "arm_angle", "release_height", "plate_x", "plate_z"])
-    .drop_nulls()
-).collect(engine="streaming")
-print(df.height)
-# take random subset
+df = pl.scan_csv('cleaned_data/pitch_ft_2326.csv').collect(engine="streaming")
+print(df.columns)
 df_s = df.sample(n=100000, shuffle=True)
-print(df_s.height)
-
-# %% model training loop
+# %% xgb training loop
 def train(X, y):
     # train test split
     x_train, x_val, y_train, y_val = train_test_split(
@@ -33,7 +27,7 @@ def train(X, y):
         "min_child_weight": np.linspace(1, 40, 10, dtype=int),
         "subsample": np.linspace(0.5, 1, 8),
         "colsample_bytree": [0.5, .65, 0.75, .9, 1],
-        "n_estimators": np.linspace(100, 2000, 20, dtype=int),
+        "n_estimators": np.linspace(100, 10000, 100, dtype=int),
         "reg_lambda": [1, 3, 5, 10, 20, 25, 35, 45, 55, 70],
     }
 
@@ -86,51 +80,27 @@ def train(X, y):
     print(f"RMSE: {root_mean_squared_error(y_true=y_val2, y_pred=ypred)}")
     return fmodel, x_val2, y_val2
 
+# %% train features
+df_s = df_s.drop_nulls(subset=['release_extension', 'release_height', 'arm_angle', 'release_x', 
+                'release_spin_rate', 'spin_axis', 'vra', 'hra', 'pitch_value', 'release_speed'])
+X = df_s.select(['release_extension', 'release_height', 'arm_angle', 'release_x', 
+                'release_spin_rate', 'spin_axis', 'vra', 'hra', 'release_speed'])
+y = df_s.select(['pitch_value'])
 
-# xgb models
-# %% plate x
-plt_x_X = df_s.select(["arm_angle", "hra", "vra", "release_x", "release_height"])
-plate_x = df_s.select(["plate_x"])
-plt_x_model, x_test, y_test = train(X=plt_x_X, y=plate_x)
-xgb.plot_importance(plt_x_model)
+# %% model train and validation
+model, x_test, y_test = train(X, y)
+print(r2_score(y_true=y_test, y_pred=model.predict(x_test)))
+print(mean_absolute_error(y_true=y_test, y_pred=model.predict(x_test)))
 
-
-# %% plate z
-plt_Z_X = df_s.select(["arm_angle", "hra", "vra", "release_x", "release_height"])
-plate_z = df_s.select(["plate_z"])
-plt_z_model, x_test, y_test = train(X=plt_Z_X, y=plate_z)
-xgb.plot_importance(plt_z_model)
-
-# %% plt_x shap values
-shap.initjs()
-tree = shap.TreeExplainer(plt_x_model)
-sample = plt_x_X.sample(10000, shuffle=True)
+# %% shap values
+tree = shap.TreeExplainer(model)
+sample = X.sample(10000, shuffle=True)
 shap_values = tree.shap_values(sample)
-shap.summary_plot(shap_values, sample, plot_type="bar")
-x_exact_values = np.abs(shap_values).mean(axis=0)
-print(x_exact_values)
-
-# %% plt_z shap values
-tree = shap.TreeExplainer(plt_z_model)
-sample = plt_Z_X.sample(10000, shuffle=True)
-shap_values = tree.shap_values(sample)
-shap.summary_plot(shap_values, sample, plot_type="bar")
+shap.summary_plot(
+    shap_values, 
+    features=X, 
+    feature_names=X.columns, 
+    plot_type="bar"
+)
 z_exact_values = np.abs(shap_values).mean(axis=0)
 print(z_exact_values)
-
-# %% feature importance
-# varience of x and z
-var_x = (df['plate_x'].std()) **2
-var_z = (df['plate_z'].std()) **2
-# dataframe
-data = {
-    "feature": ["arm_angle", "hra", "vra", "release_x", "release_height"],
-    "shap_x": x_exact_values,
-    "shap_z": z_exact_values
-}
-# df of importance weight of features
-df = pl.DataFrame(data).with_columns(
-    total_importance = (pl.col("shap_x") * var_x) + (pl.col("shap_z") * var_z)
-).sort("total_importance", descending=True)
-
-df.write_csv('cmd_importance.csv')

@@ -13,6 +13,7 @@ class Loader(Dataset):
         self.knn = knn
         # intra pitch
         self.pitch_groups = df.group_by(['pitcher_id', 'pitch', 'game_year']).groups
+    
     def __getitem__(self, index):
         anchor_row = self.df.row(index=index)
         anchor = torch.tensor(self.features.row(index=index, dtype=torch.float32))
@@ -35,8 +36,9 @@ class Loader(Dataset):
             positive = torch.tensor(self.features[ind], dtype=torch.float32)            
         
         return anchor, positive, index
-# pitch loss
-class tripletLoss(nn.Module): # with hard mining
+
+# pitch loss, with hard mining
+class tripletLoss(nn.Module): 
     def __init__(self, anchor, margin):
         super(tripletLoss, self).__init__
         self.margin = margin
