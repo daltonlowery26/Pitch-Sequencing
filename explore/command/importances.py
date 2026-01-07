@@ -18,13 +18,13 @@ df_s = df.sample(n=100000, shuffle=True)
 print(df_s.height)
 
 # %% model training loop
-def train(X, y):
+def train(X, y, seed):
     # train test split
     x_train, x_val, y_train, y_val = train_test_split(
-        X, y, test_size=0.3, random_state=26, shuffle=True
+        X, y, test_size=0.3, random_state=seed, shuffle=True
     )
     x_val, x_val2, y_val, y_val2 = train_test_split(
-        x_val, y_val, test_size=0.5, random_state=26, shuffle=True
+        x_val, y_val, test_size=0.5, random_state=seed, shuffle=True
     )
     # general space to search
     rnd_search_params = {
@@ -33,7 +33,7 @@ def train(X, y):
         "min_child_weight": np.linspace(1, 40, 10, dtype=int),
         "subsample": np.linspace(0.5, 1, 8),
         "colsample_bytree": [0.5, .65, 0.75, .9, 1],
-        "n_estimators": np.linspace(100, 2000, 20, dtype=int),
+        "n_estimators": np.linspace(100, 1000, 100, dtype=int),
         "reg_lambda": [1, 3, 5, 10, 20, 25, 35, 45, 55, 70],
     }
 
@@ -46,7 +46,7 @@ def train(X, y):
     model = xgb.XGBRegressor(
         objective="reg:squarederror",
         device="cpu",
-        random_state=26,
+        random_state=seed,
         early_stopping_rounds=30,
         n_jobs=4,
     )
@@ -56,8 +56,8 @@ def train(X, y):
         param_distributions=rnd_search_params,
         cv=pds,
         scoring="neg_root_mean_squared_error",
-        n_iter=10,
-        random_state=26,
+        n_iter=25,
+        random_state=seed,
         verbose=1,
         n_jobs=4,
     )
@@ -70,53 +70,86 @@ def train(X, y):
     # search and extract best params
     search = rnd_searcher.fit(x_combined, y_combined, **fit_params_xgb)
     best_params = search.best_params_
-    print(best_params)
+    #print(best_params)
     fmodel = xgb.XGBRegressor(
         objective="reg:squarederror",
         tree_method="hist",
         device="cpu",
-        random_state=26,
+        random_state=seed,
         early_stopping_rounds=30,
         n_jobs=4,
         **best_params,
     )
     # fit model on best params, rmse
     fmodel.fit(x_train, y_train, **fit_params_xgb)
-    ypred = fmodel.predict(x_val2)
-    print(f"RMSE: {root_mean_squared_error(y_true=y_val2, y_pred=ypred)}")
+    #ypred = fmodel.predict(x_val2)
+    #print(f"RMSE: {root_mean_squared_error(y_true=y_val2, y_pred=ypred)}")
     return fmodel, x_val2, y_val2
-
 
 # xgb models
 # %% plate x
 plt_x_X = df_s.select(["arm_angle", "hra", "vra", "release_x", "release_height"])
 plate_x = df_s.select(["plate_x"])
-plt_x_model, x_test, y_test = train(X=plt_x_X, y=plate_x)
-xgb.plot_importance(plt_x_model)
-
+plt_x_model, x_test, y_test = train(X=plt_x_X, y=plate_x, seed=26)
 
 # %% plate z
 plt_Z_X = df_s.select(["arm_angle", "hra", "vra", "release_x", "release_height"])
 plate_z = df_s.select(["plate_z"])
-plt_z_model, x_test, y_test = train(X=plt_Z_X, y=plate_z)
-xgb.plot_importance(plt_z_model)
+plt_z_model, x_test, y_test = train(X=plt_Z_X, y=plate_z, seed=26)
 
 # %% plt_x shap values
-shap.initjs()
-tree = shap.TreeExplainer(plt_x_model)
-sample = plt_x_X.sample(10000, shuffle=True)
-shap_values = tree.shap_values(sample)
-shap.summary_plot(shap_values, sample, plot_type="bar")
-x_exact_values = np.abs(shap_values).mean(axis=0)
-print(x_exact_values)
+features = ["arm_angle", "hra", "vra", "release_x", "release_height"]
+
+x_results =  {key: [] for key in features}
+for i in range(50):
+    plt_x_X = df_s.select(["arm_angle", "hra", "vra", "release_x", "release_height"])
+    plate_x = df_s.select(["plate_x"])
+    seed = np.random.randint(0, 1000)
+    # train model with random seed
+    plt_x_model, x_test, y_test = train(X=plt_x_X, y=plate_x, seed=seed)
+    # shap values
+    tree = shap.TreeExplainer(plt_x_model)
+    shap_values = tree.shap_values(x_test)
+    # find contribution to each group
+    z_exact_values = np.abs(shap_values).mean(axis=0)
+    iter_total_contribution = z_exact_values.sum()
+    # add run to 
+    for idx in features:
+        percent = (z_exact_values[idx] / iter_total_contribution) * 100
+        x_results[idx].append(percent)
+
+print(f"{'Group':<5} {'Avg Contribution % (50 runs)':<30}")
+for group, values in x_results.items():
+    avg_percent = np.mean(values)
+    std_dev = np.std(values)
+    print(f"{group:<10} {avg_percent:<20.2f} {std_dev:<10.2f}")
+
 
 # %% plt_z shap values
-tree = shap.TreeExplainer(plt_z_model)
-sample = plt_Z_X.sample(10000, shuffle=True)
-shap_values = tree.shap_values(sample)
-shap.summary_plot(shap_values, sample, plot_type="bar")
-z_exact_values = np.abs(shap_values).mean(axis=0)
-print(z_exact_values)
+z_results =  {key: [] for key in features}
+for i in range(50):
+    plt_Z_X = df_s.select(["arm_angle", "hra", "vra", "release_x", "release_height"])
+    plate_z = df_s.select(["plate_z"])
+    seed = np.random.randint(0, 1000)
+    # train model with random seed
+    plt_z_model, z_test, y_test = train(X=plt_Z_X, y=plate_z, seed=seed)
+    # shap values
+    tree = shap.TreeExplainer(plt_z_model)
+    shap_values = tree.shap_values(z_test)
+    # find contribution to each group
+    z_exact_values = np.abs(shap_values).mean(axis=0)
+    iter_total_contribution = z_exact_values.sum()
+    # add run to 
+    for idx in features:
+        percent = (z_exact_values[idx] / iter_total_contribution) * 100
+        z_results[idx].append(percent)
+
+print(f"{'Group':<5} {'Avg Contribution % (50 runs)':<30}")
+for group, values in z_results.items():
+    avg_percent = np.mean(values)
+    std_dev = np.std(values)
+    print(f"{group:<10} {avg_percent:<20.2f} {std_dev:<10.2f}")
+
 
 # %% feature importance
 # varience of x and z

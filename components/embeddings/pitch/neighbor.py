@@ -65,3 +65,4 @@ def wasserstein_distance(mu_A, sigma_A, mu_B, sigma_B):
     w2_sq = diff_mu + trace_term
     
     return np.sqrt(max(0, w2_sq))
+

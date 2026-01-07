@@ -9,16 +9,31 @@ from sklearn.metrics import root_mean_squared_error, r2_score, mean_absolute_err
 from sklearn.model_selection import PredefinedSplit, RandomizedSearchCV, train_test_split
 os.chdir("C:/Users/dalto/OneDrive/Pictures/Documents/Projects/Coding Projects/Optimal Pitch/data/")
 df = pl.scan_csv('cleaned_data/pitch_ft_2326.csv').collect(engine="streaming")
-print(df.columns)
 df_s = df.sample(n=100000, shuffle=True)
+
+# %% player df
+target_cols = [
+    'release_extension', 'release_height', 'release_x', 
+    'ihb', 'ivb', 'vra', 'hra', 'haa', 'vaa', 
+    'release_speed', 'pitch_value', 'arm_angle'
+]
+
+df_p = df.group_by(['pitcher_name', 'pitcher_id', 'pitch_name', 'game_year']).agg(
+    pl.col(target_cols).mean()
+)
+
+# %% command merge
+command = pl.read_csv('cleaned_data/player_cmd_grades.csv')
+df_p = df_p.join(command, on=['pitcher_id', 'pitcher_name', 'pitch_name', 'game_year'], how='left')
+
 # %% xgb training loop
-def train(X, y):
+def train(X, y, seed):
     # train test split
     x_train, x_val, y_train, y_val = train_test_split(
-        X, y, test_size=0.3, random_state=26, shuffle=True
+        X, y, test_size=0.3, random_state=seed, shuffle=True
     )
     x_val, x_val2, y_val, y_val2 = train_test_split(
-        x_val, y_val, test_size=0.5, random_state=26, shuffle=True
+        x_val, y_val, test_size=0.5, random_state=seed, shuffle=True
     )
     # general space to search
     rnd_search_params = {
@@ -40,7 +55,7 @@ def train(X, y):
     model = xgb.XGBRegressor(
         objective="reg:squarederror",
         device="cpu",
-        random_state=26,
+        random_state=seed,
         early_stopping_rounds=30,
         n_jobs=4,
     )
@@ -50,8 +65,8 @@ def train(X, y):
         param_distributions=rnd_search_params,
         cv=pds,
         scoring="neg_root_mean_squared_error",
-        n_iter=10,
-        random_state=26,
+        n_iter=25,
+        random_state=seed,
         verbose=1,
         n_jobs=4,
     )
@@ -64,32 +79,31 @@ def train(X, y):
     # search and extract best params
     search = rnd_searcher.fit(x_combined, y_combined, **fit_params_xgb)
     best_params = search.best_params_
-    print(best_params)
+    #print(best_params)
     fmodel = xgb.XGBRegressor(
         objective="reg:squarederror",
         tree_method="hist",
         device="cpu",
-        random_state=26,
+        random_state=seed,
         early_stopping_rounds=30,
         n_jobs=4,
         **best_params,
     )
     # fit model on best params, rmse
     fmodel.fit(x_train, y_train, **fit_params_xgb)
-    ypred = fmodel.predict(x_val2)
-    print(f"RMSE: {root_mean_squared_error(y_true=y_val2, y_pred=ypred)}")
+    #ypred = fmodel.predict(x_val2)
+    #print(f"RMSE: {root_mean_squared_error(y_true=y_val2, y_pred=ypred)}")
     return fmodel, x_val2, y_val2
 
 # %% train features
-df_s = df_s.drop_nulls(subset=['release_extension', 'release_height', 'arm_angle', 'release_x', 
-                'release_spin_rate', 'spin_axis', 'vra', 'hra', 'pitch_value', 'release_speed'])
-X = df_s.select(['release_extension', 'release_height', 'arm_angle', 'release_x', 
-                'release_spin_rate', 'spin_axis', 'vra', 'hra', 'release_speed'])
-y = df_s.select(['pitch_value'])
+df_t = df_p.drop_nulls(subset=['release_extension', 'release_height', 'release_x', 
+                'ihb', 'ivb', 'vra', 'hra', 'haa', 'vaa', 'release_speed', 'avg_command', 'arm_angle'])
+X = df_t.select(['release_extension', 'release_height', 'release_x', 
+                'ihb', 'ivb', 'vra', 'hra', 'haa', 'vaa', 'release_speed', 'avg_command', 'arm_angle'])
+y = df_t.select(['pitch_value'])
 
 # %% model train and validation
-model, x_test, y_test = train(X, y)
-print(r2_score(y_true=y_test, y_pred=model.predict(x_test)))
+model, x_test, y_test = train(X, y, seed=26)
 print(mean_absolute_error(y_true=y_test, y_pred=model.predict(x_test)))
 
 # %% shap values
@@ -102,5 +116,38 @@ shap.summary_plot(
     feature_names=X.columns, 
     plot_type="bar"
 )
-z_exact_values = np.abs(shap_values).mean(axis=0)
-print(z_exact_values)
+
+# %% loop importances
+indices = {
+    'release': [0, 1, 2, 11],
+    'pitch': [3, 4, 5, 6, 7, 8, 9],
+    'command': [10]
+}
+results_storage = {key: [] for key in indices.keys()}
+
+for i in range(50):
+    X = df_t.select(['release_extension', 'release_height', 'release_x', 
+                    'ihb', 'ivb', 'vra', 'hra', 'haa', 'vaa', 'release_speed', 'avg_command', 'arm_angle'])
+    y = df_t.select(['pitch_value'])
+    seed = np.random.randint(0, 1000)
+    # train model with random seed
+    model, x_test, y_test = train(X, y, seed=seed)
+    # shap values
+    tree = shap.TreeExplainer(model)
+    shap_values = tree.shap_values(x_test)
+    # find contribution to each group
+    z_exact_values = np.abs(shap_values).mean(axis=0)
+    iter_total_contribution = z_exact_values.sum()
+    for group_name, idx_list in indices.items():
+        group_sum = z_exact_values[idx_list].sum()
+        percent = (group_sum / iter_total_contribution) * 100
+        
+        results_storage[group_name].append(percent)
+
+# average importance over 15 runs 
+print(f"{'Group':<5} {'Avg Contribution % (50 runs)':<30}")
+print("-" * 35)
+for group_name, percentages in results_storage.items():
+    avg_percent = np.mean(percentages)
+    std_dev = np.std(percentages)
+    print(f"{group_name:<5} {avg_percent:.2f}% (±{std_dev:.2f})")

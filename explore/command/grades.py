@@ -151,6 +151,7 @@ def bio_mechanical_variance(pitchers, pitches, df=df):
 pitchers = df['pitcher_name'].unique()
 pitches = df['pitch_name'].unique()
 command = bio_mechanical_variance(pitchers, pitches)
+command.write_csv('raw_data/pitch_cmd_grades.csv')
 
 # %% extracting command value
 avg = command.group_by(['pitcher_id', 'pitcher_name', 'pitch_name', 'game_year']).agg(
