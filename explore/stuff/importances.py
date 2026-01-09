@@ -98,36 +98,14 @@ def train(X, y, seed):
 # %% train features
 df_t = df_p.drop_nulls(subset=['release_extension', 'release_height', 'release_x', 
                 'ihb', 'ivb', 'vra', 'hra', 'haa', 'vaa', 'release_speed', 'avg_command', 'arm_angle'])
-X = df_t.select(['release_extension', 'release_height', 'release_x', 
-                'ihb', 'ivb', 'vra', 'hra', 'haa', 'vaa', 'release_speed', 'avg_command', 'arm_angle'])
-y = df_t.select(['pitch_value'])
 
-# %% model train and validation
-model, x_test, y_test = train(X, y, seed=26)
-print(mean_absolute_error(y_true=y_test, y_pred=model.predict(x_test)))
-
-# %% shap values
-tree = shap.TreeExplainer(model)
-sample = X.sample(10000, shuffle=True)
-shap_values = tree.shap_values(sample)
-shap.summary_plot(
-    shap_values, 
-    features=X, 
-    feature_names=X.columns, 
-    plot_type="bar"
-)
-
-# %% loop importances
-indices = {
-    'release': [0, 1, 2, 11],
-    'pitch': [3, 4, 5, 6, 7, 8, 9],
-    'command': [10]
-}
-results_storage = {key: [] for key in indices.keys()}
-
-for i in range(50):
-    X = df_t.select(['release_extension', 'release_height', 'release_x', 
-                    'ihb', 'ivb', 'vra', 'hra', 'haa', 'vaa', 'release_speed', 'avg_command', 'arm_angle'])
+# %% feature importances
+# results
+features = ['release_extension', 'release_height', 'release_x', 
+                'ihb', 'ivb', 'vra', 'hra', 'haa', 'vaa', 'release_speed', 'avg_command', 'arm_angle']
+results = {key: [] for key in features}
+for i in range(20):
+    X = df_t.select(features)
     y = df_t.select(['pitch_value'])
     seed = np.random.randint(0, 1000)
     # train model with random seed
@@ -137,17 +115,26 @@ for i in range(50):
     shap_values = tree.shap_values(x_test)
     # find contribution to each group
     z_exact_values = np.abs(shap_values).mean(axis=0)
-    iter_total_contribution = z_exact_values.sum()
-    for group_name, idx_list in indices.items():
-        group_sum = z_exact_values[idx_list].sum()
-        percent = (group_sum / iter_total_contribution) * 100
-        
-        results_storage[group_name].append(percent)
+    for i in range(len(features)):
+        feature = features[i]
+        results[feature].append(z_exact_values[i])
 
-# average importance over 15 runs 
-print(f"{'Group':<5} {'Avg Contribution % (50 runs)':<30}")
-print("-" * 35)
-for group_name, percentages in results_storage.items():
-    avg_percent = np.mean(percentages)
-    std_dev = np.std(percentages)
-    print(f"{group_name:<5} {avg_percent:.2f}% (±{std_dev:.2f})")
+# %% contribution to run value
+indices = {
+    'release': [0, 1, 2, 11],
+    'pitch': [3, 4, 5, 6, 7, 8, 9],
+    'command': [10]}
+# percentages for group
+mean_dict = {f: np.mean(results[f]) for f in features}
+total_sum = sum(mean_dict.values())
+ft_percentages = {f: mean_dict[f]/total_sum for f in features}
+# importances of catagories
+category_percentages = {}
+for category, idx_list in indices.items():
+    total_pct = sum(ft_percentages[features[i]] for i in idx_list)
+    category_percentages[category] = total_pct
+    print(f'{category}: {total_pct:.2%}')
+
+# release: 21.53%
+# pitch: 44.11%
+# command: 34.35%

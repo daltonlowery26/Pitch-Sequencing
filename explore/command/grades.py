@@ -75,7 +75,7 @@ def plot_pitch_intent(pitch_data, targets):
 # %% intended target
 def bio_mechanical_variance(pitchers, pitches, df=df):
     # intended target cols
-    feature_cols = ['release_x', 'release_height', 'vra', 'hra']
+    feature_cols = [ "hra", "vra", "release_x", "release_height"]
     
     # filter valid pitches
     cohort = df.filter(
@@ -127,7 +127,7 @@ def bio_mechanical_variance(pitchers, pitches, df=df):
         inv_covs = cov_lookup.get((throws, pitch_type, b_stand, year, aa))
 
         # mahoabalhis dist
-        weights = np.array([.36648363, .23062016, .46066925, .48497144])   
+        weights = np.array([.3284, .2571, .2735, .1410])   
         diff = (joint_data - assigned_means) * weights
         mahal_sq = np.einsum('ij,jk,ik->i', diff, inv_covs, diff)
         mahal_dist = np.sqrt(mahal_sq)
@@ -199,11 +199,11 @@ print(weights)
 avg = avg.with_columns(
     combined = (0.707 * pl.col("avg_command")) + (-0.707 * pl.col("std_command"))
 )
+
 # %% correlations
-command = ['avg_command', 'botCmd SL', 'wSL/C']
+command = ['avg_command', 'botCmd CH', 'wCH/C']
 correlation_df = (avg
-    .filter(pl.col('pitch_name') == 'Slider')
-    .select([pl.corr('botCmd SL', col).alias(col) 
+    .select([pl.corr('avg_command', col).alias(col) 
         for col in command])
 )
 print(correlation_df)

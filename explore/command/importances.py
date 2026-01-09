@@ -5,17 +5,14 @@ import shap
 import numpy as np
 import polars as pl
 import xgboost as xgb
-from sklearn.metrics import root_mean_squared_error
 from sklearn.model_selection import PredefinedSplit, RandomizedSearchCV, train_test_split
 os.chdir("C:/Users/dalto/OneDrive/Pictures/Documents/Projects/Coding Projects/Optimal Pitch/data/")
 df = (
     pl.scan_csv("cleaned_data/pitch_ft_2326.csv").select(["vra", "hra", "release_x", "arm_angle", "release_height", "plate_x", "plate_z"])
     .drop_nulls()
 ).collect(engine="streaming")
-print(df.height)
 # take random subset
 df_s = df.sample(n=100000, shuffle=True)
-print(df_s.height)
 
 # %% model training loop
 def train(X, y, seed):
@@ -86,23 +83,22 @@ def train(X, y, seed):
     #print(f"RMSE: {root_mean_squared_error(y_true=y_val2, y_pred=ypred)}")
     return fmodel, x_val2, y_val2
 
-# xgb models
-# %% plate x
+# %% single shot xgb model
+# plate x
 plt_x_X = df_s.select(["arm_angle", "hra", "vra", "release_x", "release_height"])
 plate_x = df_s.select(["plate_x"])
 plt_x_model, x_test, y_test = train(X=plt_x_X, y=plate_x, seed=26)
 
-# %% plate z
+# plate z
 plt_Z_X = df_s.select(["arm_angle", "hra", "vra", "release_x", "release_height"])
 plate_z = df_s.select(["plate_z"])
 plt_z_model, x_test, y_test = train(X=plt_Z_X, y=plate_z, seed=26)
 
 # %% plt_x shap values
-features = ["arm_angle", "hra", "vra", "release_x", "release_height"]
-
+features = [ "hra", "vra", "release_x", "release_height"]
 x_results =  {key: [] for key in features}
-for i in range(50):
-    plt_x_X = df_s.select(["arm_angle", "hra", "vra", "release_x", "release_height"])
+for i in range(10):
+    plt_x_X = df_s.select(["hra", "vra", "release_x", "release_height"])
     plate_x = df_s.select(["plate_x"])
     seed = np.random.randint(0, 1000)
     # train model with random seed
@@ -112,23 +108,15 @@ for i in range(50):
     shap_values = tree.shap_values(x_test)
     # find contribution to each group
     z_exact_values = np.abs(shap_values).mean(axis=0)
-    iter_total_contribution = z_exact_values.sum()
     # add run to 
-    for idx in features:
-        percent = (z_exact_values[idx] / iter_total_contribution) * 100
-        x_results[idx].append(percent)
-
-print(f"{'Group':<5} {'Avg Contribution % (50 runs)':<30}")
-for group, values in x_results.items():
-    avg_percent = np.mean(values)
-    std_dev = np.std(values)
-    print(f"{group:<10} {avg_percent:<20.2f} {std_dev:<10.2f}")
-
+    for i in range(len(features)):
+        feature = features[i]
+        x_results[feature].append(z_exact_values[i])
 
 # %% plt_z shap values
 z_results =  {key: [] for key in features}
-for i in range(50):
-    plt_Z_X = df_s.select(["arm_angle", "hra", "vra", "release_x", "release_height"])
+for i in range(20):
+    plt_Z_X = df_s.select(["hra", "vra", "release_x", "release_height"])
     plate_z = df_s.select(["plate_z"])
     seed = np.random.randint(0, 1000)
     # train model with random seed
@@ -138,32 +126,20 @@ for i in range(50):
     shap_values = tree.shap_values(z_test)
     # find contribution to each group
     z_exact_values = np.abs(shap_values).mean(axis=0)
-    iter_total_contribution = z_exact_values.sum()
     # add run to 
-    for idx in features:
-        percent = (z_exact_values[idx] / iter_total_contribution) * 100
-        z_results[idx].append(percent)
-
-print(f"{'Group':<5} {'Avg Contribution % (50 runs)':<30}")
-for group, values in z_results.items():
-    avg_percent = np.mean(values)
-    std_dev = np.std(values)
-    print(f"{group:<10} {avg_percent:<20.2f} {std_dev:<10.2f}")
-
+    for i in range(len(features)):
+        feature = features[i]
+        z_results[feature].append(z_exact_values[i])
 
 # %% feature importance
-# varience of x and z
-var_x = (df['plate_x'].std()) **2
-var_z = (df['plate_z'].std()) **2
-# dataframe
-data = {
-    "feature": ["arm_angle", "hra", "vra", "release_x", "release_height"],
-    "shap_x": x_exact_values,
-    "shap_z": z_exact_values
-}
-# df of importance weight of features
-df = pl.DataFrame(data).with_columns(
-    total_importance = (pl.col("shap_x") * var_x) + (pl.col("shap_z") * var_z)
-).sort("total_importance", descending=True)
+for feature in features:
+    # get raw contirbutions
+    raw_x_contributions = np.array(x_results[feature])
+    raw_z_contributions = np.array(z_results[feature])
+    raw_z_contributions = raw_z_contributions[:10]
+    # l2 importance
+    magnitude_importance = np.sqrt(raw_x_contributions**2 + raw_z_contributions**2)
+    # feature
+    print(f"Feature: {feature}")
+    print(f"Mean Spatial Shift: {magnitude_importance.mean():.4f} inches")
 
-df.write_csv('cmd_importance.csv')
