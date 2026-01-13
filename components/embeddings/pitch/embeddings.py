@@ -1,3 +1,4 @@
+# trained on colab
 # %% packages
 import torch
 import polars as pl
@@ -5,7 +6,7 @@ import torch.nn as nn
 from torch.utils.data import Dataset
 import numpy as np
 
-# %% numerical stability utli arising from handling of covar matrices
+# %% numerical stability utlis arising from handling of covar matrices
 class SafeLog(torch.autograd.Function):
     @staticmethod
     def forward(ctx, sigma):
@@ -211,7 +212,7 @@ class SiameseNet(nn.Module):
         for h_dim in hidden_dims:
             layers.append(nn.Linear(curr_dim, h_dim))
             layers.append(nn.BatchNorm1d(h_dim))
-            layers.append(nn.ReLU())
+            layers.append(nn.LeakyReLU())
             layers.append(nn.Dropout(p=0.2))
             curr_dim = h_dim
             
@@ -233,6 +234,8 @@ def train_model(model, dataloader, optimizer, criterion, device, epochs):
     # training loop
     for epoch in range(epochs):
         total_loss = 0.0
+        best_loss = np.inf
+        best_model = None
         for batch_idx, batch_features in enumerate(dataloader):
             # batch features
             for k, v in batch_features.items():
@@ -245,6 +248,10 @@ def train_model(model, dataloader, optimizer, criterion, device, epochs):
                 gt_distances = relative_distance(batch_features)
             # triplet loss 
             loss = criterion(embeddings, gt_distances)
+            # save best model
+            if loss < best_loss:
+                best_loss = loss
+                best_model = model
             # backward pass
             if loss.requires_grad:
                 loss.backward()
@@ -255,20 +262,77 @@ def train_model(model, dataloader, optimizer, criterion, device, epochs):
             
         avg_loss = total_loss / len(dataloader)
         print(f"Epoch [{epoch+1}/{epochs}], Loss: {avg_loss:.6f}")
-
-    return model
-
-# %% train loop
-if __name__ == "__main__":  
-    # data loaders
-    input = pl.read_csv('cleaned_data/pitch_mu_cov.parquet')
-    dataset = ManifoldDataset(df = input)
-    dataloader = torch.utils.data.DataLoader(dataset, batch_size=64, shuffle=True)
+    return best_model
     
-    # model params
-    model = SiameseNet(input_dim=11, embedding_dim=32)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=0.001, weight_decay=1e-4)
-    criterion = TripletLoss() # default params in method sig
+# %% embeddings extracting
+def get_embeddings(model, dataloader, device):
+    model.eval()
+    model.to(device)
+    all_embeddings = []
+    # forward pass
+    with torch.no_grad():
+        for batch_features in dataloader:
+            # input to device
+            input_data = batch_features['input_emb'].to(device)
+            emb = model(input_data)
+            # detatch embeddings, to numpy
+            all_embeddings.append(emb.cpu().numpy())
+            
+    # concate all embeddings together
+    return np.vstack(all_embeddings)
+
+# %% find 5 clostest embeddings
+def get_closest_embeddings(query_emb, embedding_database, k=5):
+    # correct dim
+    if query_emb.ndim == 1:
+        query_emb = query_emb[np.newaxis, :]
+        
+    # normalize for cos sim
+    query_norm = query_emb / np.linalg.norm(query_emb, axis=1, keepdims=True)
+    db_norm = embedding_database / np.linalg.norm(embedding_database, axis=1, keepdims=True)
     
-    # train
-    trained_model = train_model(model, dataloader, optimizer, criterion, device="cuda", epochs=10)
+    # dot product
+    scores = np.dot(query_norm, db_norm.T).squeeze()
+    
+    # topk
+    top_k_indices = np.argpartition(scores, -k)[-k:]
+    
+    # sort the top k
+    top_k_indices = top_k_indices[np.argsort(scores[top_k_indices])[::-1]]
+    top_k_scores = scores[top_k_indices]
+    
+    return top_k_indices, top_k_scores
+
+# model params
+# data loaders
+input = pl.read_parquet('/content/drive/MyDrive/pitch_mu_cov.parquet')
+dataset = ManifoldDataset(df = input)
+dataloader = torch.utils.data.DataLoader(dataset, batch_size=64, shuffle=True)
+
+# model params
+model = SiameseNet(input_dim=11, embedding_dim=32)
+optimizer = torch.optim.AdamW(model.parameters(), lr=0.001, weight_decay=1e-4)
+criterion = TripletLoss() # default params in method sig
+
+# %% train
+trained_model = train_model(model, dataloader, optimizer, criterion, device="cuda", epochs=10)
+
+# %% embeddings search
+# get search index
+inference_loader = torch.utils.data.DataLoader(dataset, batch_size=64, shuffle=False)
+embeddings = get_embeddings(model=trained_model, dataloader=inference_loader, device="cuda")
+indices = (input
+    .with_row_index(name="orig_index")
+    .filter(
+        (pl.col('pitcher_name') == 'Cabrera, Edward') & 
+        (pl.col('pitch_name') == 'Changeup') &
+        (pl.col('game_year') == 2025))
+    .get_column("orig_index"))
+indices = indices.item()
+# get 5 closest embeddings by distance
+index, _ = get_closest_embeddings(embeddings[indices],  embeddings)
+players = (input
+    .with_row_index(name="orig_index")
+    .filter(pl.col("orig_index").is_in(index))
+    .select(['pitcher_name', 'pitch_name', 'game_year']))
+print(players)
