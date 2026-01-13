@@ -1,12 +1,11 @@
 # proof of concept
-
 # %% knn for pitches, compare distributions
 import polars as pl
 import numpy as np
 import scipy
 import os
 os.chdir("C:/Users/dalto/OneDrive/Pictures/Documents/Projects/Coding Projects/Optimal Pitch/data/")
-df = pl.scan_csv('cleaned_data/pitch_ft_2326.csv').select(['pitcher_name', 'pitch_name', 'game_year', 
+df = pl.scan_csv('cleaned_data/pitch_ft_2326.csv').select(['pitcher_name', 'pitcher_id', 'pitch_name', 'game_year', 
     'vx0', 'vy0', 'vz0', 'ax', 'ay', 'az', 'release_extension', 'release_height', 'release_x']).collect(engine="streaming")
 
 # %% disturbtion and comparison
@@ -19,7 +18,7 @@ def kinematic_params(df_pitcher):
     mu = np.mean(data, axis=0)
     sigma = np.cov(data, rowvar=False)
     
-    return mu, sigma
+    return mu, sigma.flatten()
 
 def release_params(df_pitcher):
     # release features
@@ -30,12 +29,12 @@ def release_params(df_pitcher):
     mu = np.mean(data, axis=0)
     sigma = np.cov(data, rowvar=False)
     
-    return mu, sigma
+    return mu, sigma.flatten()
 
 # %% release and kinematic
 data = []
-for key, pitches in df.group_by(['pitcher_name', 'pitch_name', 'game_year']):
-    if len(pitches) < 15:
+for key, pitches in df.group_by(['pitcher_name',  'pitch_name', 'game_year', 'pitcher_id']):
+    if len(pitches) < 20:
         continue
     kmu, ksigma = kinematic_params(pitches)
     rmu, rsigma = release_params(pitches)
@@ -46,18 +45,21 @@ for key, pitches in df.group_by(['pitcher_name', 'pitch_name', 'game_year']):
     
     # append data 
     data.append({
-        'pitcher_name': key[0], 'pitch_name': key[1], 'game_year': key[2],
+        'pitcher_name': key[0], 'pitcher_id':key[3], 'pitch_name': key[1], 'game_year': key[2],
         'kmu': kmu, 'ksigma': ksigma, 'rmu': rmu, 'rsigma': rsigma
     })
 
 mu_cov = pl.DataFrame(data)
 print(mu_cov.height)
-# %%
-cmd = pl.read_csv('cleaned_data/player_cmd_grades.csv')
-cmd = cmd.group_by(['pitcher_name', 'pitch_name', 'game_year']).mean()
-mu_cov = mu_cov.join(cmd, on=['pitcher_name', 'pitch_name', 'game_year'], how='left')
+
+# %% add command
+cmd = pl.read_csv('cleaned_data/cmd_grades.csv')
+mu_cov = mu_cov.join(cmd, on=['pitcher_name', 'pitch_name', 'pitcher_id', 'game_year'], how='left')
 mu_cov = mu_cov.drop_nulls()
+mu_cov.head()
+# %%
 print(mu_cov.height)
+mu_cov.write_parquet('cleaned_data/pitch_mu_cov.parquet')
 
 # %% compare pitchers
 def get_wasserstein_components(mu_A, sigma_A, mu_B_all, sigma_B_all):
@@ -154,8 +156,8 @@ def nearest_neighbors(target_df, comparison_df, top_n):
 
 # %% nearest neighbors
 # need cols and comapison
-cols_needed = ['pitcher_name', 'pitch_name', 'game_year', 'kmu', 'ksigma', 'rmu', 'rsigma', 'avg_command', 'std_command']
+cols_needed = ['pitcher_name', 'pitch_name', 'game_year', 'p_throws', 'kmu', 'ksigma', 'rmu', 'rsigma', 'avg_command', 'std_command']
 mu_cov_compare = mu_cov.select(cols_needed)
-mu_cov_search = mu_cov.filter(pl.col('pitcher_name') == 'Imanaga, Shota')
-neighbor_data = find_nearest_neighbors(mu_cov_search, mu_cov_compare, top_n=10)
+mu_cov_search = mu_cov.filter(pl.col('pitcher_name') == 'Skubal, Tarik')
+neighbor_data = nearest_neighbors(mu_cov_search, mu_cov_compare, top_n=15)
 neighbor_data.write_csv('data.csv')

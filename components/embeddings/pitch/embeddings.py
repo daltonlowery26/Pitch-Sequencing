@@ -1,30 +1,83 @@
+# %% packages
 import torch
+import polars as pl
 import torch.nn as nn
 from torch.utils.data import Dataset
 import numpy as np
 
-# %% efficent loading
+# %% numerical stability utli arising from handling of covar matrices
+class SafeLog(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, sigma):
+        # standard log matrix
+        L, U = torch.linalg.eigh(sigma)
+        # clamp eigen to avoid log 0
+        L = torch.clamp(L, min=1e-8)
+        L_log = torch.log(L)
+        ctx.save_for_backward(L, U, L_log) # check if safe for gradient descent 
+        return U @ torch.diag_embed(L_log) @ U.transpose(-2, -1)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        L, U, L_log = ctx.saved_tensors
+        # denominators of matrix (eigenvalues)
+        L_i = L.unsqueeze(-1)
+        L_j = L.unsqueeze(-2)
+        L_diff = L_i - L_j
+        # similairty mask, do we need do take the limit for the backward pass 
+        is_close = torch.abs(L_diff) < 1e-6 
+        # distinict eigenvalues case
+        L_diff_safe = torch.where(is_close, torch.ones_like(L_diff), L_diff)
+        log_i = L_log.unsqueeze(-1)
+        log_j = L_log.unsqueeze(-2)
+        P_distinct = (log_i - log_j) / L_diff_safe
+        # repeated eigenvalues case
+        inv_L = 1.0 / L
+        inv_L_i = inv_L.unsqueeze(-1)
+        inv_L_j = inv_L.unsqueeze(-2)
+        P_limit = (inv_L_i + inv_L_j) / 2.0
+        # use distinict when far limit withn close
+        P = torch.where(is_close, P_limit, P_distinct)
+        # find gradient, for backprop (Daleckii-Krein formula)
+        U_T = U.transpose(-2, -1)
+        grad_sym = (U_T @ grad_output @ U)
+        grad_sigma = U @ (P * grad_sym) @ U_T
+        # enforce that the matrix is symmetirc, covar matrices must be sdp
+        return (grad_sigma + grad_sigma.transpose(-2, -1)) / 2.0
+        
+def make_spd(matrix, eps=1e-6):
+    # project to ensure matrix is symmetric, postive, definite
+    sym = (matrix + matrix.transpose(-2, -1)) / 2
+    # add jiggle to axis to enure positivity
+    eye = torch.eye(matrix.shape[-1], device=matrix.device, dtype=matrix.dtype)
+    return sym + (eye * eps)
+    
+# %% efficent distance 
 def relative_distance(batch_features):
+    # take log of matrix, project curved manifold into eucledian space
+    def matrix_log(sigma):
+            return SafeLog.apply(sigma)
+    
     # extract and reshape
     rmu = batch_features['rmu'] 
-    rsigma = batch_features['rsigma'] 
+    rsigma_log = matrix_log(batch_features['rsigma']) 
     kmu = batch_features['kmu']      
-    ksigma = batch_features['ksigma']
+    ksigma_log = matrix_log(batch_features['ksigma'])
     avg_cmd = batch_features['avg_command'].view(-1, 1) # add dim to mantain shape
     std_cmd = batch_features['std_command'].view(-1, 1)
 
-    # squared frobenius norm proxy, does relative ranking of dist between matrices doesnt provide exact value
+    # cannot use full wass. sqrt of matrix are not paralizable
     # release
     r_mean_dist = torch.sum((rmu.unsqueeze(1) - rmu.unsqueeze(0))**2, dim=2) # dist between means
-    r_cov_dist = torch.sum((rsigma.unsqueeze(1) - rsigma.unsqueeze(0))**2, dim=(2, 3))
+    r_cov_dist = torch.sum((rsigma_log.unsqueeze(1) - rsigma_log.unsqueeze(0))**2, dim=(2, 3))
     r_dists = r_mean_dist + r_cov_dist
     # kinematics 
     k_mean_dist = torch.sum((kmu.unsqueeze(1) - kmu.unsqueeze(0))**2, dim=2)
-    k_cov_dist = torch.sum((ksigma.unsqueeze(1) - ksigma.unsqueeze(0))**2, dim=(2, 3))
+    k_cov_dist = torch.sum((ksigma_log.unsqueeze(1) - ksigma_log.unsqueeze(0))**2, dim=(2, 3))
     k_dists = k_mean_dist + k_cov_dist
 
     # eucledian dist for command
-    cmd_dists = torch.sqrt((avg_cmd - avg_cmd.T)**2 + (std_cmd - std_cmd.T)**2)
+    cmd_dists = (avg_cmd - avg_cmd.T)**2 + (std_cmd - std_cmd.T)**2
 
     # normalization based on scale of values 
     k_mean_val = torch.mean(k_dists)
@@ -37,14 +90,14 @@ def relative_distance(batch_features):
     cmd_norm = cmd_dists / (cmd_mean_val + 1e-8)
 
     # weighted sum of componenet based on features
-    total_loss = (k_norm * 0.4411) + (r_norm * 0.2153) + (cmd_norm * 0.3435)
+    total_dist_matrix = (k_norm * 0.4411) + (r_norm * 0.2153) + (cmd_norm * 0.3435)
 
-    return total_loss
+    return total_dist_matrix
 
 # %% triplet loss, with hard mining
-class BatchHardTripletLoss(nn.Module):
+class TripletLoss(nn.Module): # lambda_scale might need to be tuned
     def __init__(self, lambda_scale=.25, pos_threshold=0.2, neg_threshold=0.8):
-        super(BatchHardTripletLoss, self).__init__()
+        super(TripletLoss, self).__init__()
         self.lambda_scale = lambda_scale # gt units to embedding units
         self.pos_p = pos_threshold # take top x clostest
         self.neg_p = neg_threshold # take bottom 1-x as negs
@@ -95,8 +148,127 @@ class BatchHardTripletLoss(nn.Module):
         valid_triplets = (mask_pos.sum(1) > 0) & (mask_neg.sum(1) > 0)
         return loss[valid_triplets].mean() # average loss for triplets for every target
 
-# %% data loader, need to have rsigma, rmu ...  calculations in
+# %% data loader & dataset
+class ManifoldDataset(Dataset):
+    def __init__(self, df):
+       # cols to tensor
+        def col_to_tensor(col_name):
+            return torch.tensor(df[col_name].to_list(), dtype=torch.float32)
+        # input features 
+        kmu = col_to_tensor('kmu')        
+        rmu = col_to_tensor('rmu')      
+        avg_cmd = col_to_tensor('avg_command').view(-1, 1) # reshape to add dims for concat
+        std_cmd = col_to_tensor('std_command').view(-1, 1)
+        # raw input vector
+        raw_inputs = torch.cat([kmu, rmu, avg_cmd, std_cmd], dim=1) # 6 + 3 + 2 = 11
+        # stanardize all the inputs
+        mean = raw_inputs.mean(dim=0)
+        std = raw_inputs.std(dim=0)
+        self.input_emb = (raw_inputs - mean) / (std + 1e-8)
+        # average 
+        self.avg_cmd_target = avg_cmd.squeeze()
+        self.std_cmd_target = std_cmd.squeeze()
+        self.kmu_target = kmu
+        self.rmu_target = rmu
+        # load and reshape matrices
+        rsigma_flat = torch.tensor(df['rsigma'].to_list(), dtype=torch.float64)
+        ksigma_flat = torch.tensor(df['ksigma'].to_list(), dtype=torch.float64)
+        # dim of matrices
+        r_dim = int(np.sqrt(rsigma_flat.shape[1]))
+        k_dim = int(np.sqrt(ksigma_flat.shape[1]))
+        # reshape 
+        self.rsigma = rsigma_flat.view(-1, r_dim, r_dim)
+        self.ksigma = ksigma_flat.view(-1, k_dim, k_dim)
+        # sdp saftey, covar matrixs are sdp
+        self.rsigma = make_spd(self.rsigma)
+        self.ksigma = make_spd(self.ksigma)
 
-# %% mlp, multi layer perception
+    def __len__(self):
+        return len(self.input_emb)
+
+    def __getitem__(self, idx):
+        # return precomputed data from idx, much quicker
+        return {
+            'input_emb': self.input_emb[idx],     
+            'avg_command': self.avg_cmd_target[idx],
+            'std_command': self.std_cmd_target[idx],
+            'rmu': self.rmu_target[idx],
+            'kmu': self.kmu_target[idx],
+            'rsigma': self.rsigma[idx],
+            'ksigma': self.ksigma[idx]
+        }
+
+
+# %% residual mlp
+class SiameseNet(nn.Module):
+    def __init__(self, input_dim, embedding_dim=32, hidden_dims=[64, 128]):
+        # inheirt
+        super(SiameseNet, self).__init__()
+        # layers and input dim
+        layers = []
+        curr_dim = input_dim
+        # simple fcn
+        for h_dim in hidden_dims:
+            layers.append(nn.Linear(curr_dim, h_dim))
+            layers.append(nn.BatchNorm1d(h_dim))
+            layers.append(nn.ReLU())
+            layers.append(nn.Dropout(p=0.2))
+            curr_dim = h_dim
+            
+        # projection layer
+        layers.append(nn.Linear(curr_dim, embedding_dim))
+        
+        self.net = nn.Sequential(*layers)
+
+    def forward(self, x):
+        # generate embeddings
+        embeddings = self.net(x)
+        # normalize so model doesnt just explode embedding magnitutde
+        return torch.nn.functional.normalize(embeddings, p=2, dim=1)
 
 # %% train loop     
+def train_model(model, dataloader, optimizer, criterion, device, epochs):
+    model.to(device)
+    model.train()
+    # training loop
+    for epoch in range(epochs):
+        total_loss = 0.0
+        for batch_idx, batch_features in enumerate(dataloader):
+            # batch features
+            for k, v in batch_features.items():
+                batch_features[k] = v.to(device)
+            optimizer.zero_grad()
+            # forward pass create
+            embeddings = model(batch_features['input_emb'])
+            # ground truth distances, based on gt distance
+            with torch.no_grad():
+                gt_distances = relative_distance(batch_features)
+            # triplet loss 
+            loss = criterion(embeddings, gt_distances)
+            # backward pass
+            if loss.requires_grad:
+                loss.backward()
+                # gradient clipping
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                optimizer.step()
+                total_loss += loss.item()
+            
+        avg_loss = total_loss / len(dataloader)
+        print(f"Epoch [{epoch+1}/{epochs}], Loss: {avg_loss:.6f}")
+
+    return model
+
+# %% train loop
+if __name__ == "__main__":  
+    # data loaders
+    input = pl.read_csv('cleaned_data/pitch_mu_cov.parquet')
+    dataset = ManifoldDataset(df = input)
+    dataloader = torch.utils.data.DataLoader(dataset, batch_size=64, shuffle=True)
+    
+    # model params
+    model = SiameseNet(input_dim=11, embedding_dim=32)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=0.001, weight_decay=1e-4)
+    criterion = TripletLoss() # default params in method sig
+    
+    # train
+    trained_model = train_model(model, dataloader, optimizer, criterion, device="cuda", epochs=10)
