@@ -1,3 +1,4 @@
 *.csv
 *.md
 *.parquet
+*.pth

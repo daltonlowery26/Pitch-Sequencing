@@ -161,6 +161,7 @@ avg = command.group_by(['pitcher_id', 'pitcher_name', 'pitch_name', 'game_year']
 )
 avg.write_csv('cleaned_data/cmd_grades.csv')
 avg = avg.filter(pl.col('game_year') == 2025).filter(pl.col('count') > 100)
+
 # %% year over year stability
 yoy_stability = (
     avg.join(
@@ -183,6 +184,7 @@ cmd_stats = pl.read_csv('raw_data/cmd/bot_cmd.csv')
 avg = avg.join(pitch_grades, right_on=['MLBAMID'], left_on=['pitcher_id'], how='left')
 avg = avg.join(cmd_stats, right_on=['MLBAMID'], left_on=['pitcher_id'], how='left')
 print(avg.columns)
+
 # %% std and avg combined
 # pca
 scaler = StandardScaler()
