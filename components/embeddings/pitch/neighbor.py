@@ -5,8 +5,9 @@ import numpy as np
 import scipy
 import os
 os.chdir("C:/Users/dalto/OneDrive/Pictures/Documents/Projects/Coding Projects/Optimal Pitch/data/")
-df = pl.scan_csv('cleaned_data/pitch_ft_2326.csv').select(['pitcher_name', 'pitcher_id', 'pitch_name', 'game_year', 
+df = pl.scan_csv('cleaned_data/pitch_ft_2326.csv').select(['pitcher_name', 'pitcher_id', 'p_throws', 'pitch_name', 'game_year', 
     'vx0', 'vy0', 'vz0', 'ax', 'ay', 'az', 'release_extension', 'release_height', 'release_x']).collect(engine="streaming")
+
 
 # %% disturbtion and comparison
 def kinematic_params(df_pitcher):
@@ -33,7 +34,7 @@ def release_params(df_pitcher):
 
 # %% release and kinematic
 data = []
-for key, pitches in df.group_by(['pitcher_name',  'pitch_name', 'game_year', 'pitcher_id']):
+for key, pitches in df.group_by(['pitcher_name', 'pitch_name', 'game_year', 'pitcher_id', 'p_throws']):
     if len(pitches) < 20:
         continue
     kmu, ksigma = kinematic_params(pitches)
@@ -45,7 +46,7 @@ for key, pitches in df.group_by(['pitcher_name',  'pitch_name', 'game_year', 'pi
     
     # append data 
     data.append({
-        'pitcher_name': key[0], 'pitcher_id':key[3], 'pitch_name': key[1], 'game_year': key[2],
+        'pitcher_name': key[0], 'pitcher_id':key[3], 'pitch_name': key[1], 'p_throws': key[4], 'game_year': key[2],
         'kmu': kmu, 'ksigma': ksigma, 'rmu': rmu, 'rsigma': rsigma
     })
 
@@ -53,13 +54,14 @@ mu_cov = pl.DataFrame(data)
 print(mu_cov.height)
 
 # %% add command
-cmd = pl.read_csv('cleaned_data/cmd_grades.csv')
+cmd = pl.read_csv('cleaned_data/metrics/cmd_grades.csv')
 mu_cov = mu_cov.join(cmd, on=['pitcher_name', 'pitch_name', 'pitcher_id', 'game_year'], how='left')
 mu_cov = mu_cov.drop_nulls()
 mu_cov.head()
-# %%
+
+# %% add describing info
 print(mu_cov.height)
-mu_cov.write_parquet('cleaned_data/pitch_mu_cov.parquet')
+mu_cov.write_parquet('cleaned_data/metrics/pitch_mu_cov.parquet')
 
 # %% compare pitchers
 def get_wasserstein_components(mu_A, sigma_A, mu_B_all, sigma_B_all):

@@ -63,6 +63,18 @@ unclean = unclean.with_columns(
 swing = ['hit_into_play', 'foul', 'swinging_strike', 'foul_tip', 'swinging_strike_blocked']
 unclean = unclean.with_columns(pl.col('description').is_in(swing).alias('swing'))
 
-
 # %% clean csv
 unclean.write_csv("cleaned_data/pitch_2015_2026.csv")
+
+# %% clean pitch arsenal
+a_2023 = pl.scan_csv('raw_data/arsenal/pitch_a_23.csv').select(pl.col(['last_name, first_name', 'player_id', 'pitch_name', 'run_value_per_100', 'pitches', 'whiff_percent', 'est_woba'])).with_columns(game_year=2023).collect(engine="streaming")
+a_2024 = pl.scan_csv('raw_data/arsenal/pitch_a_24.csv').select(pl.col(['last_name, first_name', 'player_id', 'pitch_name', 'run_value_per_100', 'pitches', 'whiff_percent', 'est_woba'])).with_columns(game_year=2024).collect(engine="streaming")
+a_2025 = pl.scan_csv('raw_data/arsenal/pitch_a_25.csv').select(pl.col(['last_name, first_name', 'player_id', 'pitch_name', 'run_value_per_100', 'pitches', 'whiff_percent', 'est_woba'])).with_columns(game_year=2025).collect(engine="streaming")
+a_total = pl.concat([a_2023, a_2024, a_2025], how="vertical")
+a_total = a_total.rename({'last_name, first_name': 'name', 'player_id':'pitcher_id', 'run_value_per_100': 'rv_100', 'pitches': 'pitches', 'est_woba': 'xwoba'})
+a_total.head()
+
+# %% write csv
+a_total.write_csv('cleaned_data/metrics/arsenal.csv')
+
+

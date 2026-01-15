@@ -1,13 +1,16 @@
 # %% packages
 import os
+import gc
 import numpy as np
 import polars as pl
+import polars.selectors as cs
 import matplotlib.pyplot as plt
 import seaborn as sns
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset
 from sklearn.manifold import TSNE
+from sklearn.neighbors import NearestNeighbors
 os.chdir("C:/Users/dalto/OneDrive/Pictures/Documents/Projects/Coding Projects/Optimal Pitch/data/")
 
 # %% numerical stability utlis arising from handling of covar matrices
@@ -50,7 +53,6 @@ class SafeLog(torch.autograd.Function):
         # enforce that the matrix is symmetirc, covar matrices must be sdp
         return (grad_sigma + grad_sigma.transpose(-2, -1)) / 2.0
 
-
 def make_spd(matrix, eps=1e-6):
     # project to ensure matrix is symmetric, postive, definite
     sym = (matrix + matrix.transpose(-2, -1)) / 2
@@ -60,7 +62,7 @@ def make_spd(matrix, eps=1e-6):
 
 
 # %% efficent distance
-def relative_distance(batch_features, normalization_stats=None):
+def relative_distance(batch_features, normalization_stats):
     # take log of matrix, project curved manifold into eucledian space
     def matrix_log(sigma):
         return SafeLog.apply(sigma)
@@ -113,8 +115,8 @@ def relative_distance(batch_features, normalization_stats=None):
 
 
 # %% triplet loss, with hard mining
-class TripletLoss(nn.Module):  # lambda_scale might need to be tuned
-    def __init__(self, lambda_scale=0.25, pos_threshold=0.2, neg_threshold=0.8):
+class TripletLoss(nn.Module): 
+    def __init__(self, lambda_scale=2, pos_threshold=0.2, neg_threshold=0.8):
         super(TripletLoss, self).__init__()
         self.lambda_scale = lambda_scale  # gt units to embedding units
         self.pos_p = pos_threshold  # take top x clostest
@@ -317,7 +319,7 @@ def get_embeddings(model, dataloader, device):
     return np.vstack(all_embeddings)
 
 # %% find 5 clostest embeddings
-def get_closest_embeddings(query_emb, embedding_database, k=5):
+def get_closest_embeddings(query_emb, embedding_database, k):
     # correct dim
     if query_emb.ndim == 1:
         query_emb = query_emb[np.newaxis, :]
@@ -383,53 +385,115 @@ dataloader = torch.utils.data.DataLoader(dataset, batch_size=512, shuffle=True)
 normalization_stats = get_normalization_stats(dataset, device="cuda") # norm. stats
 
 # model params
-embedding_dim = 64
+embedding_dim = 32
 model = SiameseNet(input_dim=11, embedding_dim=embedding_dim)
 optimizer = torch.optim.AdamW(model.parameters(), lr=0.001, weight_decay=1e-4)
 criterion = TripletLoss()  # default params in method sig
 
 # %% train, returns last iter model
 trained_model = train_model(model, dataloader, optimizer, criterion, device="cuda", epochs=100, normalization_stats=normalization_stats)
+# %% clean env
+torch.cuda.empty_cache()
+gc.collect()
 
-# %% nearest embeddings 
+# %% load saved best model
 best_model = SiameseNet(input_dim=11, embedding_dim=embedding_dim)
-dict = torch.load('../models/pitch_embed.pth')
+dict = torch.load('../models/pitch_embed.pth', weights_only=True)
 best_model.load_state_dict(dict)
 
-# infrence and closeness
+# %% infrence and closeness
 inference_loader = torch.utils.data.DataLoader(dataset, batch_size=64, shuffle=False)
-embeddings = get_embeddings(model=trained_model, dataloader=inference_loader, device="cuda")
-indices = (
-    input.with_row_index(name="orig_index")
-    .filter(
-        (pl.col("pitcher_name") == "Cabrera, Edward")
-        & (pl.col("pitch_name") == "Changeup")
-        & (pl.col("game_year") == 2025)
+embeddings = get_embeddings(model=best_model, dataloader=inference_loader, device="cuda")
+
+# add preformance data
+ars = pl.read_csv('cleaned_data/metrics/arsenal.csv')
+input = input.join(ars, on=['pitcher_id', 'pitch_name', 'game_year'], how='left')
+
+# %% group diff from means and varience
+def weighted_comps(df, embeddings, metric_cols, weight_col, k):
+    # cosine similarity vectorized using nearest neighbors
+    nbrs = NearestNeighbors(n_neighbors=k, metric='cosine', n_jobs=-1)
+    nbrs.fit(embeddings)
+    _, indices = nbrs.kneighbors(embeddings)
+    # k most similar rows to each target
+    n_rows = len(df)
+    target_indices = np.repeat(np.arange(n_rows), k)
+    neighbor_indices = indices.flatten()
+    neighbors_df = pl.DataFrame({
+        "orig_index": target_indices,
+        "neighbor_index": neighbor_indices
+    })
+    # add row index
+    df_indexed = df.with_row_index("row_id")
+    # keep our target stats
+    target_stats = df_indexed.select(
+        [pl.col("row_id").alias("orig_index")] + 
+        [pl.col(m).alias(f"{m}_target") for m in metric_cols]
     )
-    .get_column("orig_index"))
-indices = indices.item() # detach get just int index
+    
+    # get neighbors and weights (pitches)
+    neighbor_stats = df_indexed.select(
+        [pl.col("row_id").alias("neighbor_index"), pl.col(weight_col).alias("w_i")] + 
+        [pl.col(m).alias(f"{m}_neighbor") for m in metric_cols]
+    )
 
-# get 5 closest embeddings by distance
-index, _ = get_closest_embeddings(embeddings[indices], embeddings)
-players = (input.with_row_index(name="orig_index")
-    .filter(pl.col("orig_index").is_in(index))
-    .select(["pitcher_name", "pitch_name", "game_year"]))
-print(players)
-# %% tsne embeddings visuals
-color_col = pl.col('pitch_name')
-reducer = TSNE(n_components=2, metric='cosine', init='pca', learning_rate='auto', random_state=42)
-tsne_coords = reducer.fit_transform(embeddings)
-# raw data with info
-plot_data = input.select(color_col).to_pandas()
-plot_data['UMAP_1'] = tsne_coords[:, 0]
-plot_data['UMAP_2'] = tsne_coords[:, 1]
+    # merge all together based on orginal row index
+    joined = (
+        neighbors_df
+        .join(target_stats, on="orig_index")
+        .join(neighbor_stats, on="neighbor_index")
+    )
 
-# plot
-plt.figure(figsize=(12, 8))
-sns.scatterplot(
+    # weighted mean and varience for columns
+    agg_exprs = []
+    
+    for m in metric_cols:
+        x_i = pl.col(f"{m}_neighbor")
+        x_t = pl.col(f"{m}_target")
+        w_i = pl.col("w_i")
+        # weighted based on pitches to limit the effect of small sample size varience in pitch results
+        w_mean = (x_i * w_i).sum() / w_i.sum()
+        w_diff = ((x_i - x_t).abs() * w_i).sum() / w_i.sum()
+        w_var = ((w_i * (x_i - w_mean).pow(2)).sum() / w_i.sum()).sqrt()
+        
+        agg_exprs.append(w_diff.alias(f"{m}_weighted_diff"))
+        agg_exprs.append(w_var.alias(f"{m}_weighted_std"))
+
+    result = joined.group_by("orig_index").agg(agg_exprs).sort("orig_index")
+
+    # stats
+    return result
+
+# %% embedding result preformance
+embed_pref = weighted_comps(input, embeddings, metric_cols=['rv_100', 'xwoba', 'whiff_percent'], weight_col='pitches', k=5)
+for columns in embed_pref.columns:
+    print(f'{columns} mean: {embed_pref[columns].mean()}')
+
+# %% reference stats
+for columns in input.select(cs.numeric()).columns:
+    print(f"{columns} std: {input[columns].std()}")
+
+# %% tsne by throws
+def tsne_viz(color_col):
+    color_col = color_col
+    # tsne dim reduction
+    reducer = TSNE(n_components=2, metric='cosine', init='pca', learning_rate='auto', random_state=42)
+    tsne_coords = reducer.fit_transform(embeddings)
+    # raw data with info
+    plot_data = input.select(pl.col(color_col)).to_pandas()
+    plot_data['UMAP_1'] = tsne_coords[:, 0]
+    plot_data['UMAP_2'] = tsne_coords[:, 1]
+    # plot
+    plt.figure(figsize=(12, 8))
+    sns.scatterplot(
     data=plot_data, x='UMAP_1',y='UMAP_2',hue=color_col,
     alpha=0.6,s=15,palette='viridis')
-plt.title(f"UMAP Projection of Embeddings (Colored by {color_col})")
-plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left', title=color_col)
-plt.tight_layout()
-plt.show()
+    plt.title(f"UMAP Projection of Embeddings (Colored by {color_col})")
+    plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left', title=color_col)
+    plt.tight_layout()
+    plt.show()
+
+tsne_viz('p_throws')
+
+# %% tsne by pitch type
+tsne_viz('pitch_name')
