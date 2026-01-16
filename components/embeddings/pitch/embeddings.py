@@ -11,6 +11,8 @@ import torch.nn as nn
 from torch.utils.data import Dataset
 from sklearn.manifold import TSNE
 from sklearn.neighbors import NearestNeighbors
+from scipy.spatial.distance import cdist
+import ot
 os.chdir("C:/Users/dalto/OneDrive/Pictures/Documents/Projects/Coding Projects/Optimal Pitch/data/")
 
 # %% numerical stability utlis arising from handling of covar matrices
@@ -392,6 +394,7 @@ criterion = TripletLoss()  # default params in method sig
 
 # %% train, returns last iter model
 trained_model = train_model(model, dataloader, optimizer, criterion, device="cuda", epochs=100, normalization_stats=normalization_stats)
+
 # %% clean env
 torch.cuda.empty_cache()
 gc.collect()
@@ -408,6 +411,10 @@ embeddings = get_embeddings(model=best_model, dataloader=inference_loader, devic
 # add preformance data
 ars = pl.read_csv('cleaned_data/metrics/arsenal.csv')
 input = input.join(ars, on=['pitcher_id', 'pitch_name', 'game_year'], how='left')
+input = pl.concat(
+    [input, pl.from_numpy(embeddings, schema=["embeds"])], 
+    how="horizontal"
+)
 
 # %% group diff from means and varience
 def weighted_comps(df, embeddings, metric_cols, weight_col, k):
@@ -473,7 +480,7 @@ for columns in embed_pref.columns:
 for columns in input.select(cs.numeric()).columns:
     print(f"{columns} std: {input[columns].std()}")
 
-# %% tsne by throws
+# %% tsne visual tool
 def tsne_viz(color_col):
     color_col = color_col
     # tsne dim reduction
@@ -487,13 +494,108 @@ def tsne_viz(color_col):
     plt.figure(figsize=(12, 8))
     sns.scatterplot(
     data=plot_data, x='UMAP_1',y='UMAP_2',hue=color_col,
-    alpha=0.6,s=15,palette='viridis')
+    alpha=0.6,s=15)
     plt.title(f"UMAP Projection of Embeddings (Colored by {color_col})")
     plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left', title=color_col)
     plt.tight_layout()
     plt.show()
 
+# %% throws
 tsne_viz('p_throws')
 
 # %% tsne by pitch type
-tsne_viz('pitch_name')
+types = {
+    'fb': ['4-Seam Fastball', 'Sinker'],
+    'cut': ['Cutter'],
+    'curve': ['Curveball', 'Knuckle Curve'],
+    'slide': ['Slider', 'Sweeper'],
+    'slurve': ['Slurve'],
+    'off': ['Split-Finger', 'Changeup', 'Forkball'],
+    'knuckle': ['Knuckleball']
+}
+mapping = {v: k for k, values in types.items() for v in values}
+input = input.with_columns(
+    pitch_group = pl.col("pitch_name").replace(mapping)
+)
+tsne_viz('pitch_group')
+
+
+# %% use wassermans metric and optimal transport to calculate areseal similairty
+def arsenal_distance(emb_A, usage_A, emb_B, usage_B):
+    # cost matrix
+    M = cdist(emb_A, emb_B, metric='cosine')
+    # solve optimal transport problem
+    return ot.emd2(usage_A, usage_B, M)
+
+def similar_pitchers(df_pitchers, k=20):
+    # polars to search schema 
+    ids = df_pitchers["p_season_id"].to_list()
+    # float 32
+    embeds_list = [np.vstack(e).astype(np.float32) for e in df_pitchers["embeds"]]
+    usage_list = [np.array(u, dtype=np.float32) for u in df_pitchers["usage"]]
+
+    # weighted avg embeddng for each pitcher
+    centroids = np.array([
+        np.average(e, axis=0, weights=u) 
+        for e, u in zip(embeds_list, usage_list)
+    ])
+
+    # cosine distance between all to narrow search
+    centroid_dists = cdist(centroids, centroids, metric='cosine')
+    
+    results = {}
+    for i in range(len(ids)):
+        # take top k canaidate
+        candidate_indices = np.argsort(centroid_dists[i])[1 : k + 1]
+        
+        best_match_id = None
+        min_ot_dist = float('inf')
+
+        # run only on canidates
+        for j in candidate_indices:
+            dist = arsenal_distance(
+                embeds_list[i], usage_list[i],
+                embeds_list[j], usage_list[j]
+            )
+            # return clostest
+            if dist < min_ot_dist:
+                min_ot_dist = dist
+                best_match_id = ids[j]
+        # add best match
+        results[ids[i]] = (best_match_id, min_ot_dist)
+    return results
+    
+# %% closest ares.
+input = input.with_columns(
+    p_season_id = pl.concat_str(
+            [pl.col("pitcher_id"), pl.col("game_year")], 
+            separator="-"
+        )
+)
+ars = (input.lazy()
+        .filter(pl.col("percent").is_not_null())
+        .group_by(["p_season_id"])
+        .agg([
+            pl.col("pitcher_name"),
+            pl.col("embeds"), 
+            (pl.col("percent") / pl.col("percent").sum()).alias("usage") # normalize usage
+        ])
+        .collect(engine="streaming"))
+sim = similar_pitchers(ars, k=5000)
+
+# %% match to input df
+ids = list(sim.keys())
+matched_ids = [val[0] for val in sim.values()]
+scores = [val[1] for val in sim.values()]
+
+# lookup df
+lookup = pl.DataFrame({
+    "current_id": ids,
+    "match_id": matched_ids,
+    "match_score": scores
+})
+# names
+lookup = lookup.join(input.select(['pitcher_name', 'p_season_id']), left_on=['match_id'], right_on=['p_season_id'], suffix='_match')
+lookup = lookup.join(input.select(['pitcher_name', 'p_season_id']), left_on=['current_id'], right_on=['p_season_id'], suffix='_current')
+lookup = lookup.unique()
+lookup.write_csv('pitcher_pairs.csv')

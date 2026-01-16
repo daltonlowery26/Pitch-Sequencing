@@ -74,6 +74,14 @@ a_total = pl.concat([a_2023, a_2024, a_2025], how="vertical")
 a_total = a_total.rename({'last_name, first_name': 'name', 'player_id':'pitcher_id', 'run_value_per_100': 'rv_100', 'pitches': 'pitches', 'est_woba': 'xwoba'})
 a_total.head()
 
+# %% add precent usage
+pitch_count = a_total.group_by(['name', 'pitcher_id', 'game_year']).agg(pl.col('pitches').sum().alias('total_count'))
+a_total = a_total.join(pitch_count, on=['name', 'pitcher_id', 'game_year'])
+a_total = a_total.with_columns(
+    percent = pl.col('pitches') / pl.col('total_count')
+)
+a_total.head()
+
 # %% write csv
 a_total.write_csv('cleaned_data/metrics/arsenal.csv')
 

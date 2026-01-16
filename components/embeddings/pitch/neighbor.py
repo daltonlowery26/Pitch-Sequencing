@@ -83,11 +83,9 @@ def get_wasserstein_components(mu_A, sigma_A, mu_B_all, sigma_B_all):
         sqrt_term = scipy.linalg.sqrtm(term)
         if np.iscomplexobj(sqrt_term):
             sqrt_term = sqrt_term.real
-            
         # find similairty in varience subtracing the cov
         val = tr_sigma_A + np.trace(sigma_B) - 2 * np.trace(sqrt_term)
-        trace_dists.append(val)
-                
+        trace_dists.append(val)       
     trace_term = np.array(trace_dists)
 
     # distance in means and distance in varience 
