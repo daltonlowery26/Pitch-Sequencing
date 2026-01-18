@@ -1,3 +1,4 @@
+# embeddings to represent how a pitcher is precived, a prior context embedding
 # %% packages
 import os
 import gc
@@ -11,21 +12,130 @@ import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader, random_split
 from sklearn.manifold import TSNE
 from sklearn.neighbors import NearestNeighbors
+from scipy.spatial.distance import cdist
+import ot
 os.chdir("C:/Users/dalto/OneDrive/Pictures/Documents/Projects/Coding Projects/Optimal Pitch/data/")
 
 # %% numerical stability utlis arising from handling of covar matrices
+class SafeLog(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, sigma):
+        # standard log matrix
+        L, U = torch.linalg.eigh(sigma)
+        # clamp eigen to avoid log 0
+        L = torch.clamp(L, min=1e-8)
+        L_log = torch.log(L)
+        ctx.save_for_backward(L, U, L_log)  # check if safe for gradient descent
+        return U @ torch.diag_embed(L_log) @ U.transpose(-2, -1)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        L, U, L_log = ctx.saved_tensors
+        # denominators of matrix (eigenvalues)
+        L_i = L.unsqueeze(-1)
+        L_j = L.unsqueeze(-2)
+        L_diff = L_i - L_j
+        # similairty mask, do we need do take the limit for the backward pass
+        is_close = torch.abs(L_diff) < 1e-6
+        # distinict eigenvalues case
+        L_diff_safe = torch.where(is_close, torch.ones_like(L_diff), L_diff)
+        log_i = L_log.unsqueeze(-1)
+        log_j = L_log.unsqueeze(-2)
+        P_distinct = (log_i - log_j) / L_diff_safe
+        # repeated eigenvalues case
+        inv_L = 1.0 / L
+        inv_L_i = inv_L.unsqueeze(-1)
+        inv_L_j = inv_L.unsqueeze(-2)
+        P_limit = (inv_L_i + inv_L_j) / 2.0
+        # use distinict when far limit withn close
+        P = torch.where(is_close, P_limit, P_distinct)
+        # find gradient, for backprop (Daleckii-Krein formula)
+        U_T = U.transpose(-2, -1)
+        grad_sym = U_T @ grad_output @ U
+        grad_sigma = U @ (P * grad_sym) @ U_T
+        # enforce that the matrix is symmetirc, covar matrices must be sdp
+        return (grad_sigma + grad_sigma.transpose(-2, -1)) / 2.0
+
+def make_spd(matrix, eps=1e-6):
+    # project to ensure matrix is symmetric, postive, definite
+    sym = (matrix + matrix.transpose(-2, -1)) / 2
+    # add jiggle to axis to enure positivity
+    eye = torch.eye(matrix.shape[-1], device=matrix.device, dtype=matrix.dtype)
+    return sym + (eye * eps)
 
 # %% efficent distance
 def relative_distance(batch_features, normalization_stats):
+    weights_dict = {
+        'vaa_diff': 0.07719401628733857,
+        'haa_diff': 0.088933057497284,
+        'effective_speed': 0.08040670227854997,
+        'ax': 0.07495841538536129,
+        'ay': 0.1593238757793289,
+        'az': 0.12804355247650187,
+        'arm_angle': 0.07956186876642489,
+        'release_height': 0.08793159987116557,
+        'release_x': 0.07079566880738072
+    }
+    cmd_weight = 0.15285124285066423
+    
+    # kmu 
+    kmu_order = ['vaa_diff', 'haa_diff', 'effective_speed', 'ax', 'ay', 'az', 
+                 'arm_angle', 'release_height', 'release_x']
+    
+    # weight tensor
+    feature_weights = torch.tensor([weights_dict[k] for k in kmu_order], device='cuda', dtype=torch.double)
+    k_weight_sum = feature_weights.sum().item()
+    
+    # covar weights
+    cov_scale_diag = torch.sqrt(feature_weights)
+    cov_scale_matrix = torch.diag_embed(cov_scale_diag)
+    
+    # matrix log
+    def matrix_log(sigma):
+        try:
+            return SafeLog.apply(sigma)
+        except NameError:
+            return torch.matrix_power(sigma, 1) 
+    
     # extract and reshape
     kmu = batch_features["kmu"]
-    # simple eucledian distance
-    k_mean_dist = torch.sum((kmu.unsqueeze(1) - kmu.unsqueeze(0)) ** 2, dim=2)
-    k_dists = k_mean_dist
-    k_mean_val = normalization_stats
-    # normalize and add epsilion to prevent div by 0
+    ksigma = batch_features["ksigma"]
+    avg_cmd = batch_features["cmd_value"].view(-1, 1)
+    
+    # weighted covars based on feature importance
+    ksigma_weighted = cov_scale_matrix @ ksigma @ cov_scale_matrix
+    ksigma_log = matrix_log(ksigma_weighted)
+    
+    # weighted mean distances
+    w_reshaped = feature_weights.view(1, 1, -1)
+    diff_sq = (kmu.unsqueeze(1) - kmu.unsqueeze(0)) ** 2
+    k_mean_dist = torch.sum(w_reshaped * diff_sq, dim=2)
+    
+    # covarience distance
+    k_cov_dist = torch.sum(
+        (ksigma_log.unsqueeze(1) - ksigma_log.unsqueeze(0)) ** 2, dim=(2, 3)
+    )
+    
+    # combined distance
+    k_dists = k_mean_dist + k_cov_dist
+    
+    # simple eucledian
+    cmd_dists = (avg_cmd - avg_cmd.T) ** 2
+    
+    # normalization
+    if normalization_stats is not None:
+        k_mean_val, cmd_mean_val = normalization_stats
+    else:
+        k_mean_val = torch.mean(k_dists)
+        cmd_mean_val = torch.mean(cmd_dists)
+    
+    # normalize on global values
     k_norm = k_dists / (k_mean_val + 1e-8)
-    total_dist_matrix = k_norm
+    cmd_norm = cmd_dists / (cmd_mean_val + 1e-8)
+    
+    # weighted values
+    total_dist_matrix = k_norm * k_weight_sum + cmd_norm * cmd_weight
+    
     return total_dist_matrix
 
 # %% triplet loss, with hard mining
@@ -61,7 +171,8 @@ class TripletLoss(nn.Module):
 
         # postive mask
         mask_pos = (gt_distances < pos_cutoff) & ~torch.eye(
-            batch_size, device=embeddings.device).bool()
+            batch_size, device=embeddings.device
+        ).bool()
 
         # negative mask
         mask_neg = gt_distances > neg_cutoff
@@ -104,9 +215,7 @@ class ManifoldDataset(Dataset):
             return torch.tensor(df[col_name].to_list(), dtype=torch.float32)
         # input features
         kmu = col_to_tensor("kmu")
-        avg_cmd = col_to_tensor("cmd_value").view(
-            -1, 1
-        )  # reshape to add dims for concat
+        avg_cmd = col_to_tensor("cmd_value").view(-1, 1)  # reshape to add dims for concat
         # raw input vector
         raw_inputs = torch.cat([kmu, avg_cmd], dim=1)  # 6 + 3 + 2 = 10
         # stanardize all the inputs
@@ -116,6 +225,14 @@ class ManifoldDataset(Dataset):
         # average
         self.avg_cmd_target = avg_cmd.squeeze()
         self.kmu_target = kmu
+        # load and reshape matrices
+        ksigma_flat = torch.tensor(df["ksigma"].to_list(), dtype=torch.float64)
+        # dim of matrices
+        k_dim = int(np.sqrt(ksigma_flat.shape[1]))
+        # reshape
+        self.ksigma = ksigma_flat.view(-1, k_dim, k_dim)
+        # sdp saftey, covar matrixs are sdp
+        self.ksigma = make_spd(self.ksigma)
 
     def __len__(self):
         return len(self.input_emb)
@@ -125,12 +242,13 @@ class ManifoldDataset(Dataset):
         return {
             "input_emb": self.input_emb[idx],
             "cmd_value": self.avg_cmd_target[idx],
-            "kmu": self.kmu_target[idx]
+            "kmu": self.kmu_target[idx],
+            "ksigma": self.ksigma[idx],
         }
 
 # %% mlp
 class SiameseNet(nn.Module):
-    def __init__(self, input_dim, embedding_dim=32, hidden_dims=[64, 128]):
+    def __init__(self, input_dim, embedding_dim, hidden_dims=[64, 128]):
         # inherit
         super(SiameseNet, self).__init__()
         # layers and input dim
@@ -149,7 +267,6 @@ class SiameseNet(nn.Module):
             
             nn.Linear(256, embedding_dim)
         )
-
     def forward(self, x):
         # generate embeddings
         embeddings = self.net(x)
@@ -191,6 +308,7 @@ def train_model(model, dataloader, val_loader, optimizer, criterion, device, epo
                 total_loss += loss.item()
         
         train_loss = total_loss / len(dataloader)
+
         model.eval()
         val_loss = 0.0
         with torch.no_grad():
@@ -257,29 +375,38 @@ def get_closest_embeddings(query_emb, embedding_database, k):
 # %% normalize based on gloabl statitics, not just batch subset
 def get_normalization_stats(dataset, device="cuda"):
     loader = torch.utils.data.DataLoader(dataset, batch_size=256, shuffle=False)
-    # dists for global stats 
-    k_dists_list = []
+    # dists for global stats =
+    k_dists_list, cmd_dists_list = [], []
+
     for batch_features in loader:
         for k, v in batch_features.items():
             batch_features[k] = v.to(device)
+
+        # matrix log
+        def matrix_log(sigma):
+            return SafeLog.apply(sigma)
+        
         # same distance calculation as above
         kmu = batch_features["kmu"]
-        k_mean_dist = torch.sum((kmu.unsqueeze(1) - kmu.unsqueeze(0)) ** 2, dim=2)
-        k_dists = k_mean_dist
-        k_dists_list.append(k_dists.detach().view(-1))
-    k_mean = torch.cat(k_dists_list).mean()
-    return k_mean
+        ksigma_log = matrix_log(batch_features["ksigma"])
+        avg_cmd = batch_features["cmd_value"].view(-1, 1)
 
-# %% loading input
-input = pl.read_parquet('cleaned_data/embed/pitch.parquet')
-input = input.with_columns(
-    kmu = pl.concat_arr(pl.col(['hra', 'vra', 'effective_speed', 'arm_angle', 
-                            'release_height', 'release_x', 'deltax', 'deltaz', 'ay']))
-)
+        k_mean_dist = torch.sum((kmu.unsqueeze(1) - kmu.unsqueeze(0)) ** 2, dim=2)
+        k_cov_dist = torch.sum((ksigma_log.unsqueeze(1) - ksigma_log.unsqueeze(0)) ** 2, dim=(2, 3))
+        k_dists = k_mean_dist + k_cov_dist
+
+        cmd_dists = (avg_cmd - avg_cmd.T) ** 2
+        k_dists_list.append(k_dists.detach().view(-1))
+        cmd_dists_list.append(cmd_dists.detach().view(-1))
+
+    k_mean = torch.cat(k_dists_list).mean()
+    cmd_mean = torch.cat(cmd_dists_list).mean()
+    return k_mean, cmd_mean
 
 # %% data loaders
+input = pl.read_parquet("cleaned_data/embed/pitch_mu_cov.parquet")
+input = input.filter(pl.col('count') > 0)
 dataset = ManifoldDataset(df=input)
-
 # train and val
 train_size = int(0.80 * len(dataset))
 val_size = len(dataset) - train_size
@@ -289,7 +416,6 @@ train_dataset, val_dataset = random_split(
     [train_size, val_size], 
     generator=torch.Generator().manual_seed(26)
 )
-
 # norm on only train data
 normalization_stats = get_normalization_stats(train_dataset, device="cuda")
 # dataloaders
@@ -312,14 +438,16 @@ gc.collect()
 
 # %% load saved best model
 best_model = SiameseNet(input_dim=10, embedding_dim=embedding_dim)
-dict = torch.load('../models/pitcher_embed.pth', weights_only=True)
+dict = torch.load('../models/pitch_embed.pth', weights_only=True)
 best_model.load_state_dict(dict)
 
 # %% infrence and closeness
 inference_loader = torch.utils.data.DataLoader(dataset, batch_size=64, shuffle=False)
 embeddings = get_embeddings(model=best_model, dataloader=inference_loader, device="cuda")
 
-# embeddings
+# add preformance data
+ars = pl.read_csv('cleaned_data/metrics/arsenal.csv')
+input = input.join(ars, on=['pitcher_id', 'pitch_name', 'game_year'], how='left')
 input = pl.concat(
     [input, pl.from_numpy(embeddings, schema=["embeds"])], 
     how="horizontal"
@@ -383,10 +511,11 @@ def weighted_comps(df, embeddings, metric_cols, weight_col, k):
     return result
 
 # %% embedding result preformance
-embed_pref = weighted_comps(input, embeddings, metric_cols=['pitch_value','delta_run_exp'], weight_col='pitches', k=10)
+embed_pref = weighted_comps(input, embeddings, metric_cols=['rv_100', 'xwoba', 'whiff_percent'], weight_col='pitches', k=25)
 for columns in embed_pref.columns:
     print(f'{columns} mean: {embed_pref[columns].mean()}')
-# refrence
+
+# %% refrence
 for columns in input.select(cs.numeric()).columns:
     print(f'{columns} std: {input[columns].std()}')
 
@@ -429,3 +558,86 @@ input = input.with_columns(
     pitch_group = pl.col("pitch_name").replace(mapping)
 )
 tsne_viz('pitch_group')
+
+# %% run value
+tsne_viz('rv_100')
+
+# %% use wassermans metric and optimal transport to calculate areseal similairty
+def arsenal_distance(emb_A, usage_A, emb_B, usage_B):
+    # cost matrix
+    M = cdist(emb_A, emb_B, metric='cosine')
+    # solve optimal transport problem
+    return ot.emd2(usage_A, usage_B, M)
+
+def similar_pitchers(df_pitchers, k=20):
+    # polars to search schema 
+    ids = df_pitchers["p_season_id"].to_list()
+    # float 32
+    embeds_list = [np.vstack(e).astype(np.float32) for e in df_pitchers["embeds"]]
+    usage_list = [np.array(u, dtype=np.float32) for u in df_pitchers["usage"]]
+
+    # weighted avg embeddng for each pitcher
+    centroids = np.array([
+        np.average(e, axis=0, weights=u) 
+        for e, u in zip(embeds_list, usage_list)
+    ])
+
+    # cosine distance between all to narrow search
+    centroid_dists = cdist(centroids, centroids, metric='cosine')
+    
+    results = {}
+    for i in range(len(ids)):
+        # take top k canaidate
+        candidate_indices = np.argsort(centroid_dists[i])[1 : k + 1]
+        
+        best_match_id = None
+        min_ot_dist = float('inf')
+
+        # run only on canidates
+        for j in candidate_indices:
+            dist = arsenal_distance(
+                embeds_list[i], usage_list[i],
+                embeds_list[j], usage_list[j]
+            )
+            # return clostest
+            if dist < min_ot_dist:
+                min_ot_dist = dist
+                best_match_id = ids[j]
+        # add best match
+        results[ids[i]] = (best_match_id, min_ot_dist)
+    return results
+    
+# %% closest ares.
+input = input.with_columns(
+    p_season_id = pl.concat_str(
+            [pl.col("pitcher_id"), pl.col("game_year")], 
+            separator="-"
+        )
+)
+ars = (input.lazy()
+        .filter(pl.col("percent").is_not_null())
+        .group_by(["p_season_id"])
+        .agg([
+            pl.col("pitcher_name"),
+            pl.col("embeds"), 
+            (pl.col("percent") / pl.col("percent").sum()).alias("usage") # normalize usage
+        ])
+        .collect(engine="streaming"))
+sim = similar_pitchers(ars, k=5000)
+
+# %% match to input df
+ids = list(sim.keys())
+matched_ids = [val[0] for val in sim.values()]
+scores = [val[1] for val in sim.values()]
+
+# lookup df
+lookup = pl.DataFrame({
+    "current_id": ids,
+    "match_id": matched_ids,
+    "match_score": scores
+})
+# names
+lookup = lookup.join(input.select(['pitcher_name', 'p_season_id']), left_on=['match_id'], right_on=['p_season_id'], suffix='_match')
+lookup = lookup.join(input.select(['pitcher_name', 'p_season_id']), left_on=['current_id'], right_on=['p_season_id'], suffix='_current')
+lookup = lookup.unique()
+lookup.write_csv('pitcher_pairs.csv')

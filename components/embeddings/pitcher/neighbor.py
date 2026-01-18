@@ -5,31 +5,17 @@ import numpy as np
 import scipy
 import os
 os.chdir("C:/Users/dalto/OneDrive/Pictures/Documents/Projects/Coding Projects/Optimal Pitch/data/")
-df = pl.scan_csv('cleaned_data/pitch_ft_2326.csv').select(['pitcher_name', 'pitcher_id', 'p_throws', 'pitch_name', 'game_year', 
-    'vx0', 'vy0', 'vz0', 'ax', 'ay', 'az', 'release_extension', 'release_height', 'release_x']).collect(engine="streaming")
-
+df = pl.read_parquet('cleaned_data/embed/pitcher.parquet')
 
 # %% disturbtion and comparison
-def kinematic_params(df_pitcher):
+def params(df_pitcher):
     # kinematic features
-    features = ['vx0', 'vy0', 'vz0', 'ax', 'ay', 'az']
+    features = ['vaa_diff', 'haa_diff', 'effective_speed', 'ax', 'ay', 'az', 
+                'arm_angle', 'release_height', 'release_x']
     data = df_pitcher[features].to_numpy()
-    
     # mean and covar
     mu = np.mean(data, axis=0)
     sigma = np.cov(data, rowvar=False)
-    
-    return mu, sigma.flatten()
-
-def release_params(df_pitcher):
-    # release features
-    features = ['release_extension', 'release_height', 'release_x']
-    data = df_pitcher[features].to_numpy()
-    
-    # mean and covar
-    mu = np.mean(data, axis=0)
-    sigma = np.cov(data, rowvar=False)
-    
     return mu, sigma.flatten()
 
 # %% release and kinematic
@@ -37,17 +23,15 @@ data = []
 for key, pitches in df.group_by(['pitcher_name', 'pitch_name', 'game_year', 'pitcher_id', 'p_throws']):
     if len(pitches) < 20:
         continue
-    kmu, ksigma = kinematic_params(pitches)
-    rmu, rsigma = release_params(pitches)
+    mu, sigma = params(pitches)
     # check for nas
-    params = [kmu, ksigma, rmu, rsigma]   
-    if any(np.isnan(p).any() or np.isinf(p).any() for p in params):
+    mean_var = [mu, sigma] 
+    if any(np.isnan(p).any() or np.isinf(p).any() for p in mean_var):
         continue
-    
     # append data 
     data.append({
         'pitcher_name': key[0], 'pitcher_id':key[3], 'pitch_name': key[1], 'p_throws': key[4], 'game_year': key[2],
-        'kmu': kmu, 'ksigma': ksigma, 'rmu': rmu, 'rsigma': rsigma
+        'kmu': mu, 'ksigma': sigma
     })
 
 mu_cov = pl.DataFrame(data)
@@ -55,13 +39,16 @@ print(mu_cov.height)
 
 # %% add command
 cmd = pl.read_csv('cleaned_data/metrics/cmd_grades.csv')
-mu_cov = mu_cov.join(cmd, on=['pitcher_name', 'pitch_name', 'pitcher_id', 'game_year'], how='left')
+cmd = cmd.with_columns(
+    cmd_value = pl.col("avg_command") + (pl.col("std_command") / pl.col("count").sqrt()) * np.random.normal(size=len(cmd))
+)
+mu_cov = mu_cov.join(cmd.select(['pitcher_name', 'pitch_name', 'pitcher_id', 'game_year', 'cmd_value', 'count']), on=['pitcher_name', 'pitch_name', 'pitcher_id', 'game_year'], how='left')
 mu_cov = mu_cov.drop_nulls()
 mu_cov.head()
 
 # %% add describing info
 print(mu_cov.height)
-mu_cov.write_parquet('cleaned_data/metrics/pitch_mu_cov.parquet')
+mu_cov.write_parquet('cleaned_data/embed/pitch_mu_cov.parquet')
 
 # %% compare pitchers
 def get_wasserstein_components(mu_A, sigma_A, mu_B_all, sigma_B_all):
