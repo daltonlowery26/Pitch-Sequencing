@@ -85,7 +85,7 @@ def train(X, y, seed):
 
 # %% train features
 features = ['vaa_diff', 'haa_diff', 'effective_speed', 'ax', 'ay', 'az', 
-    'arm_angle', 'release_height', 'release_x', 'cmd_value']
+            'arm_angle', 'release_height', 'release_x', 'cmd_value']
 df_t = df_p.drop_nulls()
 df_t = df_t.filter(pl.col('count') > 100)
 print(df_t.height)

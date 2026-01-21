@@ -13,29 +13,39 @@ from sklearn.manifold import TSNE
 from sklearn.neighbors import NearestNeighbors
 os.chdir("C:/Users/dalto/OneDrive/Pictures/Documents/Projects/Coding Projects/Optimal Pitch/data/")
 
-# %% numerical stability utlis arising from handling of covar matrices
+# TODO: Probablitistic distances based on the quanity of the class, double size of embedding for var and mu of point
 
 # %% efficent distance
 def relative_distance(batch_features, normalization_stats):
+    # feature weights
+    weights_dict = {}
+    
     # extract and reshape
     kmu = batch_features["kmu"]
+    kmu_order = ['hra', 'vra', 'effective_speed', 'arm_angle', 'release_height',
+                'release_x', 'deltax', 'deltaz', 'ay']
+    
+    # weight tensor
+    feature_weights = torch.tensor([weights_dict[k] for k in kmu_order], device='cuda', dtype=torch.double)
+    
     # simple eucledian distance
-    k_mean_dist = torch.sum((kmu.unsqueeze(1) - kmu.unsqueeze(0)) ** 2, dim=2)
-    k_dists = k_mean_dist
-    k_mean_val = normalization_stats
+    w_reshaped = feature_weights.view(1, 1, -1)
+    diff_sq = (kmu.unsqueeze(1) - kmu.unsqueeze(0)) ** 2
+    k_mean_dist = torch.sum(w_reshaped * diff_sq, dim=2)
+    
     # normalize and add epsilion to prevent div by 0
-    k_norm = k_dists / (k_mean_val + 1e-8)
-    total_dist_matrix = k_norm
-    return total_dist_matrix
+    k_norm = k_mean_dist / (normalization_stats + 1e-8)
+    
+    return k_norm
 
 # %% triplet loss, with hard mining
 class TripletLoss(nn.Module): 
-    def __init__(self, lambda_scale=0.5, pos_threshold=0.2, neg_threshold=0.8):
+    def __init__(self, lambda_scale=1, pos_threshold=0.2, neg_threshold=0.8):
         super(TripletLoss, self).__init__()
         self.lambda_scale = lambda_scale  # gt units to embedding units
         self.pos_p = pos_threshold  # take top x clostest
         self.neg_p = neg_threshold  # take bottom 1-x as negs
-
+    # deperciated
     def _pairwise_distance(self, embeddings):
         # distance between all embeddings
         dot_product = torch.matmul(embeddings, embeddings.t())
@@ -46,10 +56,38 @@ class TripletLoss(nn.Module):
         # clamp only to postive values
         distances = torch.clamp(distances, min=0.0)
         return torch.sqrt(distances + 1e-16)
+        
+    def _probalistic_distance(self, embeddings):
+            # get mus and sigma from embeddings
+            dim = embeddings.size(1) // 2
+            mu = embeddings[:, :dim]
+            
+            # ensure std and numerical 
+            raw_sigma = embeddings[:, dim:]
+            sigma = nn.functional.softplus(raw_sigma) + 1e-6 
+    
+            # eucledian dist between means
+            mu_dot = torch.matmul(mu, mu.t())
+            mu_sq_norm = torch.diag(mu_dot)
+            dist_sq_mu = (
+                mu_sq_norm.unsqueeze(1) - 2.0 * mu_dot + mu_sq_norm.unsqueeze(0)
+            )
+            dist_sq_mu = torch.clamp(dist_sq_mu, min=0.0)
+    
+            # squared eucledian dist for sigmas
+            sigma_dot = torch.matmul(sigma, sigma.t())
+            sigma_sq_norm = torch.diag(sigma_dot)
+            dist_sq_sigma = (sigma_sq_norm.unsqueeze(1) - 2.0 * sigma_dot + sigma_sq_norm.unsqueeze(0))
+            dist_sq_sigma = torch.clamp(dist_sq_sigma, min=0.0)
+    
+            # wasserstein distance 
+            wasserstein_dist = torch.sqrt(dist_sq_mu + dist_sq_sigma + 1e-16)
+            
+            return wasserstein_dist
 
     def forward(self, embeddings, gt_distances):
         # find distances between all embeddings
-        emb_dists = self._pairwise_distance(embeddings)
+        emb_dists = self._probalistic_distance(embeddings)
 
         # batch size, find pos and neg
         batch_size = embeddings.size(0)
@@ -68,7 +106,7 @@ class TripletLoss(nn.Module):
 
         # find hardest postive
         pos_search_matrix = emb_dists.clone()
-        pos_search_matrix[~mask_pos] = -1.0
+        pos_search_matrix[~mask_pos] = -float("inf")
         hardest_pos_dists, hardest_pos_indices = torch.max(pos_search_matrix, dim=1)
 
         # find hardest negative

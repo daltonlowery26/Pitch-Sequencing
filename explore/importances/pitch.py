@@ -2,14 +2,12 @@
 import os
 import shap
 import numpy as np
-import matplotlib.pyplot as plt
 import polars as pl
 import xgboost as xgb
-from sklearn.metrics import root_mean_squared_error, r2_score, mean_absolute_error
 from sklearn.model_selection import PredefinedSplit, RandomizedSearchCV, train_test_split
 os.chdir("C:/Users/dalto/OneDrive/Pictures/Documents/Projects/Coding Projects/Optimal Pitch/data/")
 df = pl.read_parquet('cleaned_data/embed/pitch.parquet')
-df = df.sample(n=2000000, shuffle=True)
+df = df.sample(n=500000, shuffle=True)
 print(df.columns)
 
 # %% xgb training loop
@@ -76,12 +74,12 @@ print(df_t.height)
 # %% feature importances
 X = df_t.select(features)
 y = df_t.select(['pitch_value'])
-best_params = train(X, y, 26)
-print(best_params)
+best_params = {'subsample': np.float64(0.9124999999999999), 'reg_lambda': 35, 'n_estimators': np.int64(7600), 
+    'min_child_weight': np.int64(40), 'max_depth': np.int64(10), 'learning_rate': 0.01, 'colsample_bytree': 1}
 
 # %% importances
 results = {key: [] for key in features}
-for i in range(20):
+for i in range(15):
     print(f'{i} round')
     seed = np.random.randint(0, 1000)
     X = df_t.select(features)
@@ -99,7 +97,7 @@ for i in range(20):
         device="cpu",
         random_state=seed,
         early_stopping_rounds=30,
-        n_jobs=4,
+        n_jobs=6,
         **best_params,
     )
     fit_params_xgb = {

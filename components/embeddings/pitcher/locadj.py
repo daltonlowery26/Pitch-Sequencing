@@ -41,5 +41,7 @@ df = df.with_columns(
     (pl.col('haa') - expected_vaa).alias('haa_diff')
 )
 
+# %% 
+df = df.drop_nulls()
 # %% adj export
 df.write_parquet('cleaned_data/embed/loc_adj.parquet')

@@ -7,7 +7,7 @@ os.chdir("C:/Users/dalto/OneDrive/Pictures/Documents/Projects/Coding Projects/Op
 input = (pl.scan_csv('cleaned_data/pitch_ft_2326.csv')
     .select(['pitcher_name', 'pitch_name', 'game_year', 'pitcher_id',
             'hra', 'vra', 'effective_speed', 'release_speed', 'arm_angle', 
-            'release_height', 'release_extension', 'release_x', 'vx0', 'ax', 'vz0', 'az', 'pitch_value'])).collect(engine="streaming")
+            'release_height', 'release_extension', 'release_x', 'vx0', 'ax', 'vz0', 'az', 'ay','pitch_value'])).collect(engine="streaming")
 
 # %% feat
 # tth 

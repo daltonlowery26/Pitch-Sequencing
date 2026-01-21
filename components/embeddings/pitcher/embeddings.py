@@ -11,7 +11,6 @@ import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader, random_split
 from sklearn.manifold import TSNE
-from sklearn.neighbors import NearestNeighbors
 from scipy.spatial.distance import cdist
 import ot
 os.chdir("C:/Users/dalto/OneDrive/Pictures/Documents/Projects/Coding Projects/Optimal Pitch/data/")
@@ -139,73 +138,72 @@ def relative_distance(batch_features, normalization_stats):
     return total_dist_matrix
 
 # %% triplet loss, with hard mining
-class TripletLoss(nn.Module): 
-    def __init__(self, lambda_scale=0.5, pos_threshold=0.2, neg_threshold=0.8):
+class TripletLoss(nn.Module):
+    def __init__(self, lambda_scale=2.5, pos_threshold=0.2, neg_threshold=0.8):
         super(TripletLoss, self).__init__()
-        self.lambda_scale = lambda_scale  # gt units to embedding units
-        self.pos_p = pos_threshold  # take top x clostest
-        self.neg_p = neg_threshold  # take bottom 1-x as negs
-
-    def _pairwise_distance(self, embeddings):
-        # distance between all embeddings
-        dot_product = torch.matmul(embeddings, embeddings.t())
-        square_norm = torch.diag(dot_product)
-        distances = (
-            square_norm.unsqueeze(1) - 2.0 * dot_product + square_norm.unsqueeze(0)
-        )
-        # clamp only to postive values
-        distances = torch.clamp(distances, min=0.0)
-        return torch.sqrt(distances + 1e-16)
+        self.lambda_scale = lambda_scale
+        self.pos_p = pos_threshold
+        self.neg_p = neg_threshold
 
     def forward(self, embeddings, gt_distances):
-        # find distances between all embeddings
-        emb_dists = self._pairwise_distance(embeddings)
+        # mean and var embeddings
+        emb_dim = embeddings.shape[1] // 2
+        mu = embeddings[:, :emb_dim]
+        sigma = embeddings[:, emb_dim:]
+        
+        # sigma to var for MLS distance
+        var = sigma.pow(2) + 1e-6
 
-        # batch size, find pos and neg
+        # formula: (mu_i - mu_j)^2 / (var_i + var_j) + log(var_i + var_j)
+        
+        # varience sum 
+        var_sum = var.unsqueeze(1) + var.unsqueeze(0)
+        
+        # diff inb means
+        mu_diff_sq = (mu.unsqueeze(1) - mu.unsqueeze(0)).pow(2)
+        
+        # weighted dist based on var
+        term1 = mu_diff_sq / var_sum
+        
+        # uncertainty pen
+        term2 = torch.log(var_sum)
+        
+        # scalar distance per pair
+        mls_distances = torch.sum(term1 + term2, dim=2)
+
+        # triplet selection, neg and pos percentiles and masks
         batch_size = embeddings.size(0)
-
-        # take postive and neg embeddings
         flat_gt = gt_distances.view(-1)
         pos_cutoff = torch.quantile(flat_gt, self.pos_p)
         neg_cutoff = torch.quantile(flat_gt, self.neg_p)
 
-        # postive mask
-        mask_pos = (gt_distances < pos_cutoff) & ~torch.eye(
-            batch_size, device=embeddings.device
-        ).bool()
-
-        # negative mask
+        mask_pos = (gt_distances < pos_cutoff) & ~torch.eye(batch_size, device=embeddings.device).bool()
         mask_neg = gt_distances > neg_cutoff
 
-        # find hardest postive
-        pos_search_matrix = emb_dists.clone()
-        pos_search_matrix[~mask_pos] = -1.0
-        hardest_pos_dists, hardest_pos_indices = torch.max(pos_search_matrix, dim=1)
+        # positve triplet
+        pos_search = mls_distances.clone()
+        pos_search[~mask_pos] = -float("inf") 
+        hardest_pos_dists, hardest_pos_indices = torch.max(pos_search, dim=1)
+        
+        # negative triplet
+        neg_search = mls_distances.clone()
+        neg_search[~mask_neg] = float("inf") 
+        hardest_neg_dists, hardest_neg_indices = torch.min(neg_search, dim=1)
 
-        # find hardest negative
-        neg_search_matrix = emb_dists.clone()
-        neg_search_matrix[~mask_neg] = float("inf")
-        hardest_neg_dists, hardest_neg_indices = torch.min(neg_search_matrix, dim=1)
-
-        # distance in ground truth
-        gt_pos_dists = torch.gather(
-            gt_distances, 1, hardest_pos_indices.unsqueeze(1)
-        ).squeeze()
-        gt_neg_dists = torch.gather(
-            gt_distances, 1, hardest_neg_indices.unsqueeze(1)
-        ).squeeze()
-
-        # margin based on dists
+        # dynamic margin, based on dist and loss function
+        gt_pos_dists = torch.gather(gt_distances, 1, hardest_pos_indices.unsqueeze(1)).squeeze()
+        gt_neg_dists = torch.gather(gt_distances, 1, hardest_neg_indices.unsqueeze(1)).squeeze()
         dynamic_margin = self.lambda_scale * torch.tanh(gt_neg_dists - gt_pos_dists)
+        loss = torch.relu(hardest_pos_dists - hardest_neg_dists + dynamic_margin)
 
-        # loss function, with dynamic margin. weight heavily if confident in distance, zero out if close
-        loss = torch.clamp(
-            hardest_pos_dists - hardest_neg_dists + dynamic_margin, min=0.0
-        )
-
-        # only keep valid triplets
+        # ensure valid pairs exist
         valid_triplets = (mask_pos.sum(1) > 0) & (mask_neg.sum(1) > 0)
-        return loss[valid_triplets].mean()  # average loss for triplets for every target
+        
+        # if loss is 0
+        if valid_triplets.sum() == 0:
+            return torch.tensor(0.0, device=embeddings.device, requires_grad=True)
+
+        return loss[valid_triplets].mean()
 
 # %% data loader & dataset
 class ManifoldDataset(Dataset):
@@ -248,39 +246,80 @@ class ManifoldDataset(Dataset):
 
 # %% mlp
 class SiameseNet(nn.Module):
-    def __init__(self, input_dim, embedding_dim, hidden_dims=[64, 128]):
-        # inherit
+    def __init__(self, input_dim, embedding_dim):
         super(SiameseNet, self).__init__()
-        # layers and input dim
-        self.net = nn.Sequential(
-            nn.Linear(input_dim, 64),
-            nn.BatchNorm1d(64),
-            nn.ReLU(),
-            
-            nn.Linear(64, 128),
+        self.embedding_dim = embedding_dim
+        
+        # feature extractor
+        self.backbone = nn.Sequential(
+            nn.Linear(input_dim, 128),
             nn.BatchNorm1d(128),
             nn.ReLU(),
-            
             nn.Linear(128, 256),
             nn.BatchNorm1d(256),
+            nn.ReLU()
+        )
+
+        # mu head
+        self.mu_head = nn.Sequential(
+            nn.Linear(256, 256),
+            nn.BatchNorm1d(256),
             nn.ReLU(),
-            
             nn.Linear(256, embedding_dim)
         )
+
+        # sigma head
+        self.sigma_head = nn.Sequential(
+            nn.Linear(256, 128),
+            nn.BatchNorm1d(128),
+            nn.ReLU(),
+            nn.Linear(128, embedding_dim)
+        )
+
+        self._init_weights()
+
+    def _init_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                # need to intialize weights for sigma 
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0.0)
+            elif isinstance(m, nn.BatchNorm1d):
+                nn.init.constant_(m.weight, 1.0)
+                nn.init.constant_(m.bias, 0.0)
+    
+        # override last layer so init 
+        final_sigma_layer = self.sigma_head[-1]
+        if isinstance(final_sigma_layer, nn.Linear):
+            # small weights so bias dominates
+            nn.init.normal_(final_sigma_layer.weight, mean=0, std=0.001)
+            nn.init.constant_(final_sigma_layer.bias, -3.0)
+
     def forward(self, x):
-        # generate embeddings
-        embeddings = self.net(x)
-        # normalize so model doesnt just explode embedding magnitutde
-        return torch.nn.functional.normalize(embeddings, p=2, dim=1)
+        # extract shared features
+        shared_features = self.backbone(x)
+        
+        # mean
+        mu = self.mu_head(shared_features)
+        mu = torch.nn.functional.normalize(mu, p=2, dim=1)
+        
+        # sigma, softplus in loss function handles
+        raw_sigma = self.sigma_head(shared_features)
+        sigma = nn.functional.softplus(raw_sigma) + 1e-6 
+        
+        # return full embedding
+        return torch.cat([mu, sigma], dim=1)
 
 # %% train loop
 def train_model(model, dataloader, val_loader, optimizer, criterion, device, epochs, normalization_stats):
     model.to(device)
     # training loop
+    best_loss = np.inf
     for epoch in range(epochs):
         model.train()
         total_loss = 0.0
-        best_loss = np.inf
+        total_sigma_mag = 0.0
         
         # loop through data loader
         for batch_idx, batch_features in enumerate(dataloader):
@@ -297,17 +336,23 @@ def train_model(model, dataloader, val_loader, optimizer, criterion, device, epo
             with torch.no_grad():
                 gt_distances = relative_distance(batch_features, normalization_stats)
             
+            # find sigma val so model doesnt just explode sigma
+            dim = embeddings.shape[1] // 2
+            sigma_val = embeddings[:, dim:]
+            
             # triplet loss
             loss = criterion(embeddings, gt_distances)
-            
             # backward pass
             if loss.requires_grad:
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 optimizer.step()
                 total_loss += loss.item()
+                total_sigma_mag += sigma_val.mean().item()
         
+        # avg train and sigma, to ensure sigma isnt exploded
         train_loss = total_loss / len(dataloader)
+        sigma = total_sigma_mag / len(dataloader)
 
         model.eval()
         val_loss = 0.0
@@ -332,7 +377,7 @@ def train_model(model, dataloader, val_loader, optimizer, criterion, device, epo
                 best_loss = avg_val_loss
                 torch.save(model.state_dict(), '../models/pitch_embed.pth')
         
-        print(f"Epoch [{epoch + 1}/{epochs}], ValLoss: {avg_val_loss:.6f}, TrainLoss: {train_loss:.6f}")
+        print(f"Epoch [{epoch + 1}/{epochs}], ValLoss: {avg_val_loss:.6f}, TrainLoss: {train_loss:.6f}, sigma: {sigma:.6f}")
     
     return model
 
@@ -358,18 +403,33 @@ def get_closest_embeddings(query_emb, embedding_database, k):
     # correct dim
     if query_emb.ndim == 1:
         query_emb = query_emb[np.newaxis, :]
-    # normalize for cos sim
-    query_norm = query_emb / np.linalg.norm(query_emb, axis=1, keepdims=True)
-    db_norm = embedding_database / np.linalg.norm(
-        embedding_database, axis=1, keepdims=True
-    )
-    # dot product
-    scores = np.dot(query_norm, db_norm.T).squeeze()
-    # topk
-    top_k_indices = np.argpartition(scores, -k)[-k:]
-    # sort the top k
-    top_k_indices = top_k_indices[np.argsort(scores[top_k_indices])[::-1]]
-    top_k_scores = scores[top_k_indices]
+        
+    #  split my and sigma
+    dim = query_emb.shape[1] // 2
+    q_mu = query_emb[:, :dim]
+    q_sigma = query_emb[:, dim:]
+    db_mu = embedding_database[:, :dim]
+    db_sigma = embedding_database[:, dim:]
+    # sigma to var, epsilon for stability
+    q_var = np.square(q_sigma) + 1e-9
+    db_var = np.square(db_sigma) + 1e-9
+    # sum of variences
+    var_sum = q_var + db_var
+    # sqaured mean var
+    diff_sq = np.square(q_mu - db_mu)
+    # mahaoblins distance
+    term1 = diff_sq / var_sum
+    # penalize high uncertanityt
+    term2 = np.log(var_sum)
+    # total distance
+    mls_distances = np.sum(term1 + term2, axis=1)
+    # retrive k smallest distances 
+    k = min(k, len(embedding_database))
+    idx_partitioned = np.argpartition(mls_distances, k)[:k]
+    # sort by distances
+    top_k_indices = idx_partitioned[np.argsort(mls_distances[idx_partitioned])]
+    top_k_scores = mls_distances[top_k_indices]
+    
     return top_k_indices, top_k_scores
 
 # %% normalize based on gloabl statitics, not just batch subset
@@ -405,7 +465,6 @@ def get_normalization_stats(dataset, device="cuda"):
 
 # %% data loaders
 input = pl.read_parquet("cleaned_data/embed/pitch_mu_cov.parquet")
-input = input.filter(pl.col('count') > 0)
 dataset = ManifoldDataset(df=input)
 # train and val
 train_size = int(0.80 * len(dataset))
@@ -425,12 +484,12 @@ val_loader = DataLoader(val_dataset, batch_size=512, shuffle=False)
 # %% model params
 embedding_dim = 64
 model = SiameseNet(input_dim=10, embedding_dim=embedding_dim)
-optimizer = torch.optim.AdamW(model.parameters(), lr=0.0001, weight_decay=0.01)
+optimizer = torch.optim.AdamW(model.parameters(), lr=0.00001, weight_decay=0.01)
 criterion = TripletLoss()  # default params in method sig
 
 # %% train, returns last iter model
 trained_model = train_model(model, train_loader, val_loader, optimizer, 
-                criterion, device="cuda", epochs=50, normalization_stats=normalization_stats)
+                criterion, device="cuda", epochs=100, normalization_stats=normalization_stats)
 
 # %% clean env
 torch.cuda.empty_cache()
@@ -454,10 +513,53 @@ input = pl.concat(
 )
 
 # %% group diff from means and varience
-def weighted_comps(df, embeddings, metric_cols, weight_col, k):
-    nbrs = NearestNeighbors(n_neighbors=k + 1, metric='cosine', n_jobs=-1)
-    nbrs.fit(embeddings)
-    dists, indices = nbrs.kneighbors(embeddings)
+def weighted_comps(df, embeddings, metric_cols, weight_col, k, batch_size=1024):
+    dim = embeddings.shape[1] // 2
+    mu = embeddings[:, :dim]
+    sigma = embeddings[:, dim:]
+    
+    # var
+    var = np.square(sigma) + 1e-9
+
+    n_samples = len(embeddings)
+    k_adj = min(k + 1, n_samples)
+    
+    # output array
+    indices = np.empty((n_samples, k_adj), dtype=np.int32)
+    dists = np.empty((n_samples, k_adj), dtype=embeddings.dtype)
+
+    # batches
+    for start_idx in range(0, n_samples, batch_size):
+        end_idx = min(start_idx + batch_size, n_samples)
+        current_batch_len = end_idx - start_idx
+        
+        # query batch
+        q_mu = mu[start_idx:end_idx]
+        q_var = var[start_idx:end_idx]
+        
+        # broadcast to fund var
+        var_sum = q_var[:, np.newaxis, :] + var[np.newaxis, :, :]
+        diff_sq = np.square(q_mu[:, np.newaxis, :] - mu[np.newaxis, :, :])
+        
+        # MLS dist
+        term1 = diff_sq / var_sum
+        term2 = np.log(var_sum)
+        batch_dists = np.sum(term1 + term2, axis=2)
+        
+        # k+1 smallest
+        unsorted_indices = np.argpartition(batch_dists, k_adj - 1, axis=1)[:, :k_adj]
+        
+        # gather dists
+        batch_row_indices = np.arange(current_batch_len)[:, None]
+        unsorted_dists = batch_dists[batch_row_indices, unsorted_indices]
+        
+        # local sort
+        sort_order = np.argsort(unsorted_dists, axis=1)
+        
+        # store in main index
+        indices[start_idx:end_idx] = unsorted_indices[batch_row_indices, sort_order]
+        dists[start_idx:end_idx] = unsorted_dists[batch_row_indices, sort_order]
+    
     # exclude self
     dists = dists[:, 1:]
     indices = indices[:, 1:]
@@ -498,7 +600,7 @@ def weighted_comps(df, embeddings, metric_cols, weight_col, k):
     for m in metric_cols:
         x_i = pl.col(f"{m}_neighbor")
         x_t = pl.col(f"{m}_target")
-        w_total = pl.col("similarity") # * pl.col("w_count") 
+        w_total = pl.col("w_count") 
         w_mean_expr = (x_i * w_total).sum() / w_total.sum()
         w_diff = (w_mean_expr - x_t.first()).abs() 
         w_var = ((w_total * (x_i - w_mean_expr).pow(2)).sum() / w_total.sum()).sqrt()
@@ -511,7 +613,7 @@ def weighted_comps(df, embeddings, metric_cols, weight_col, k):
     return result
 
 # %% embedding result preformance
-embed_pref = weighted_comps(input, embeddings, metric_cols=['rv_100', 'xwoba', 'whiff_percent'], weight_col='pitches', k=25)
+embed_pref = weighted_comps(input, embeddings, metric_cols=['rv_100', 'xwoba', 'whiff_percent'], weight_col='pitches', k=50)
 for columns in embed_pref.columns:
     print(f'{columns} mean: {embed_pref[columns].mean()}')
 
