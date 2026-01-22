@@ -5,8 +5,7 @@
 # considering the decison a hitter make what is gain in expected value above average
 
 # architecture
-# given the pitch embedding, swing traits, how do we 
-# 
+# given the pitch embedding, swing traits, what do we expect the EV of a swing to be
 
 
 # %% packages

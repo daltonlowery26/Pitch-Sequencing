@@ -475,6 +475,7 @@ train_dataset, val_dataset = random_split(
     [train_size, val_size], 
     generator=torch.Generator().manual_seed(26)
 )
+
 # norm on only train data
 normalization_stats = get_normalization_stats(train_dataset, device="cuda")
 # dataloaders
@@ -482,14 +483,14 @@ train_loader = DataLoader(train_dataset, batch_size=512, shuffle=True)
 val_loader = DataLoader(val_dataset, batch_size=512, shuffle=False)
 
 # %% model params
-embedding_dim = 64
+embedding_dim = 64 # effectively 32
 model = SiameseNet(input_dim=10, embedding_dim=embedding_dim)
 optimizer = torch.optim.AdamW(model.parameters(), lr=0.00001, weight_decay=0.01)
 criterion = TripletLoss()  # default params in method sig
 
 # %% train, returns last iter model
 trained_model = train_model(model, train_loader, val_loader, optimizer, 
-                criterion, device="cuda", epochs=100, normalization_stats=normalization_stats)
+                criterion, device="cuda", epochs=50, normalization_stats=normalization_stats)
 
 # %% clean env
 torch.cuda.empty_cache()
@@ -513,14 +514,13 @@ input = pl.concat(
 )
 
 # %% group diff from means and varience
-def weighted_comps(df, embeddings, metric_cols, weight_col, k, batch_size=1024):
+def weighted_comps(df, embeddings, metric_cols, weight_col, k, batch_size=256):
     dim = embeddings.shape[1] // 2
     mu = embeddings[:, :dim]
     sigma = embeddings[:, dim:]
-    
     # var
     var = np.square(sigma) + 1e-9
-
+    # simple 
     n_samples = len(embeddings)
     k_adj = min(k + 1, n_samples)
     
@@ -613,7 +613,7 @@ def weighted_comps(df, embeddings, metric_cols, weight_col, k, batch_size=1024):
     return result
 
 # %% embedding result preformance
-embed_pref = weighted_comps(input, embeddings, metric_cols=['rv_100', 'xwoba', 'whiff_percent'], weight_col='pitches', k=50)
+embed_pref = weighted_comps(input, embeddings, metric_cols=['rv_100', 'xwoba', 'whiff_percent'], weight_col='pitches', k=10)
 for columns in embed_pref.columns:
     print(f'{columns} mean: {embed_pref[columns].mean()}')
 

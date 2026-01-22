@@ -7,6 +7,16 @@ import os
 os.chdir("C:/Users/dalto/OneDrive/Pictures/Documents/Projects/Coding Projects/Optimal Pitch/data/")
 df = pl.read_parquet('cleaned_data/embed/pitcher.parquet')
 
+# %% normalize
+features = [
+    'vaa_diff', 'haa_diff', 'effective_speed', 'ax', 'ay', 'az',
+    'arm_angle', 'release_height', 'release_x'
+]
+# zscore norm
+df = df.with_columns(
+    (pl.col(features) - pl.col(features).mean()) / pl.col(features).std()
+)
+    
 # %% disturbtion and comparison
 def params(df_pitcher):
     # kinematic features
@@ -44,9 +54,8 @@ cmd = cmd.with_columns(
 )
 mu_cov = mu_cov.join(cmd.select(['pitcher_name', 'pitch_name', 'pitcher_id', 'game_year', 'cmd_value', 'count']), on=['pitcher_name', 'pitch_name', 'pitcher_id', 'game_year'], how='left')
 mu_cov = mu_cov.drop_nulls()
-mu_cov.head()
 
-# %% add describing info
+# %% parquet
 print(mu_cov.height)
 mu_cov.write_parquet('cleaned_data/embed/pitch_mu_cov.parquet')
 

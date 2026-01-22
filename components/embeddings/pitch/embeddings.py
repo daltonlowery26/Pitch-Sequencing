@@ -13,12 +13,13 @@ from sklearn.manifold import TSNE
 from sklearn.neighbors import NearestNeighbors
 os.chdir("C:/Users/dalto/OneDrive/Pictures/Documents/Projects/Coding Projects/Optimal Pitch/data/")
 
-# TODO: Probablitistic distances based on the quanity of the class, double size of embedding for var and mu of point
-
 # %% efficent distance
 def relative_distance(batch_features, normalization_stats):
     # feature weights
-    weights_dict = {}
+    weights_dict = {'hra': 0.08847559, 'vra': 0.10019919, 'effective_speed': 0.07117457, 
+        'arm_angle': 0.07203883, 'release_height': 0.10646251, 'release_x': 0.13277063, 
+        'deltax': 0.19419073, 'deltaz': 0.16376331, 'ay': 0.07092461}
+
     
     # extract and reshape
     kmu = batch_features["kmu"]
@@ -45,7 +46,7 @@ class TripletLoss(nn.Module):
         self.lambda_scale = lambda_scale  # gt units to embedding units
         self.pos_p = pos_threshold  # take top x clostest
         self.neg_p = neg_threshold  # take bottom 1-x as negs
-    # deperciated
+
     def _pairwise_distance(self, embeddings):
         # distance between all embeddings
         dot_product = torch.matmul(embeddings, embeddings.t())
@@ -57,37 +58,9 @@ class TripletLoss(nn.Module):
         distances = torch.clamp(distances, min=0.0)
         return torch.sqrt(distances + 1e-16)
         
-    def _probalistic_distance(self, embeddings):
-            # get mus and sigma from embeddings
-            dim = embeddings.size(1) // 2
-            mu = embeddings[:, :dim]
-            
-            # ensure std and numerical 
-            raw_sigma = embeddings[:, dim:]
-            sigma = nn.functional.softplus(raw_sigma) + 1e-6 
-    
-            # eucledian dist between means
-            mu_dot = torch.matmul(mu, mu.t())
-            mu_sq_norm = torch.diag(mu_dot)
-            dist_sq_mu = (
-                mu_sq_norm.unsqueeze(1) - 2.0 * mu_dot + mu_sq_norm.unsqueeze(0)
-            )
-            dist_sq_mu = torch.clamp(dist_sq_mu, min=0.0)
-    
-            # squared eucledian dist for sigmas
-            sigma_dot = torch.matmul(sigma, sigma.t())
-            sigma_sq_norm = torch.diag(sigma_dot)
-            dist_sq_sigma = (sigma_sq_norm.unsqueeze(1) - 2.0 * sigma_dot + sigma_sq_norm.unsqueeze(0))
-            dist_sq_sigma = torch.clamp(dist_sq_sigma, min=0.0)
-    
-            # wasserstein distance 
-            wasserstein_dist = torch.sqrt(dist_sq_mu + dist_sq_sigma + 1e-16)
-            
-            return wasserstein_dist
-
     def forward(self, embeddings, gt_distances):
         # find distances between all embeddings
-        emb_dists = self._probalistic_distance(embeddings)
+        emb_dists = self._pairwise_distance(embeddings)
 
         # batch size, find pos and neg
         batch_size = embeddings.size(0)
@@ -126,9 +99,7 @@ class TripletLoss(nn.Module):
         dynamic_margin = self.lambda_scale * torch.tanh(gt_neg_dists - gt_pos_dists)
 
         # loss function, with dynamic margin. weight heavily if confident in distance, zero out if close
-        loss = torch.clamp(
-            hardest_pos_dists - hardest_neg_dists + dynamic_margin, min=0.0
-        )
+        loss = torch.relu(hardest_pos_dists - hardest_neg_dists + dynamic_margin)
 
         # only keep valid triplets
         valid_triplets = (mask_pos.sum(1) > 0) & (mask_neg.sum(1) > 0)
@@ -197,11 +168,11 @@ class SiameseNet(nn.Module):
 # %% train loop
 def train_model(model, dataloader, val_loader, optimizer, criterion, device, epochs, normalization_stats):
     model.to(device)
+    best_loss = np.inf
     # training loop
     for epoch in range(epochs):
         model.train()
         total_loss = 0.0
-        best_loss = np.inf
         
         # loop through data loader
         for batch_idx, batch_features in enumerate(dataloader):
