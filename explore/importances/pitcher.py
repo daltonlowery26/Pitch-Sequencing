@@ -1,18 +1,16 @@
 # %% importances of traits for run prevention
 import os
-import shap
 import numpy as np
-import matplotlib.pyplot as plt
 import polars as pl
 import xgboost as xgb
-from sklearn.metrics import root_mean_squared_error, r2_score, mean_absolute_error
+import shap
 from sklearn.model_selection import PredefinedSplit, RandomizedSearchCV, train_test_split
 os.chdir("C:/Users/dalto/OneDrive/Pictures/Documents/Projects/Coding Projects/Optimal Pitch/data/")
-df = pl.read_parquet('cleaned_data/embed/pitcher.parquet')
+df = pl.read_parquet('cleaned_data/embed/input/loc_adj.parquet')
 
 # %% player df
 df_p = df.group_by(['pitcher_name', 'pitcher_id', 'pitch_name', 'game_year']).agg(
-    pl.col(['vaa_diff', 'haa_diff', 'effective_speed', 'ax', 'ay', 'az', 
+    pl.col(['vaa_diff', 'haa_diff', 'release_speed', 'release_extension','ax', 'ay', 'az', 
             'arm_angle', 'release_height', 'release_x']).mean()
 )
 
@@ -84,16 +82,20 @@ def train(X, y, seed):
     return best_params
 
 # %% train features
-features = ['vaa_diff', 'haa_diff', 'effective_speed', 'ax', 'ay', 'az', 
+features = ['vaa_diff', 'haa_diff', 'release_speed', 'release_extension', 'ax', 'ay', 'az', 
             'arm_angle', 'release_height', 'release_x', 'cmd_value']
-df_t = df_p.drop_nulls()
-df_t = df_t.filter(pl.col('count') > 100)
+df_t = df_p.drop_nulls(subset=features)
+df_t = df_t.drop_nulls(subset='rv_100')
+df_t = df_t.filter(pl.col('count') > 50)
 print(df_t.height)
 # %% feature importances
 X = df_t.select(features)
 y = df_t.select(['rv_100'])
 best_params = train(X, y, 26)
-print(best_params)
+
+best = {'subsample': np.float64(0.5625), 'reg_lambda': 20, 'n_estimators': np.int64(2700), 
+    'min_child_weight': np.int64(18), 'max_depth': np.int64(6), 'learning_rate': 0.1, 'colsample_bytree': 1}
+
 
 # %% importances
 results = {key: [] for key in features}

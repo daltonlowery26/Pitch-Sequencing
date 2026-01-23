@@ -5,12 +5,12 @@ import numpy as np
 import scipy
 import os
 os.chdir("C:/Users/dalto/OneDrive/Pictures/Documents/Projects/Coding Projects/Optimal Pitch/data/")
-df = pl.read_parquet('cleaned_data/embed/pitcher.parquet')
+df = pl.read_parquet('cleaned_data/embed/input/loc_adj.parquet')
 
 # %% normalize
 features = [
-    'vaa_diff', 'haa_diff', 'effective_speed', 'ax', 'ay', 'az',
-    'arm_angle', 'release_height', 'release_x'
+    'vaa_diff', 'haa_diff', 'release_speed', 'ax', 'ay', 'az',
+    'arm_angle', 'release_height', 'release_x', 'release_extension'
 ]
 # zscore norm
 df = df.with_columns(
@@ -56,8 +56,8 @@ mu_cov = mu_cov.join(cmd.select(['pitcher_name', 'pitch_name', 'pitcher_id', 'ga
 mu_cov = mu_cov.drop_nulls()
 
 # %% parquet
-print(mu_cov.height)
-mu_cov.write_parquet('cleaned_data/embed/pitch_mu_cov.parquet')
+print(mu_cov)
+mu_cov.write_parquet('cleaned_data/embed/input/pitch_mu_cov.parquet')
 
 # %% compare pitchers
 def get_wasserstein_components(mu_A, sigma_A, mu_B_all, sigma_B_all):

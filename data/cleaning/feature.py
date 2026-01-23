@@ -15,7 +15,6 @@ pitches = [
 pitch = (
     pl.scan_csv("cleaned_data/pitch_2015_2026.csv")
     .filter(pl.col("pitch_name").is_in(pitches))
-    .filter(pl.col("game_year") >= 2023)
 )
 
 # vaa
@@ -71,5 +70,5 @@ pitch = pitch.with_columns(
 )
 
 # %% physical traits csv
-pitch.write_csv('cleaned_data/pitch_ft_2326.csv')
+pitch.write_csv('cleaned_data/pitch_ft_1526.parquet')
 

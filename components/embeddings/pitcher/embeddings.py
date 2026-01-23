@@ -81,7 +81,7 @@ def relative_distance(batch_features, normalization_stats):
     kmu_order = ['vaa_diff', 'haa_diff', 'effective_speed', 'ax', 'ay', 'az', 
                  'arm_angle', 'release_height', 'release_x']
     
-    # weight tensor
+    # weight tensor, reorder to same as cols
     feature_weights = torch.tensor([weights_dict[k] for k in kmu_order], device='cuda', dtype=torch.double)
     k_weight_sum = feature_weights.sum().item()
     
@@ -139,7 +139,7 @@ def relative_distance(batch_features, normalization_stats):
 
 # %% triplet loss, with hard mining
 class TripletLoss(nn.Module):
-    def __init__(self, lambda_scale=2.5, pos_threshold=0.2, neg_threshold=0.8):
+    def __init__(self, lambda_scale=1.5, pos_threshold=0.2, neg_threshold=0.8):
         super(TripletLoss, self).__init__()
         self.lambda_scale = lambda_scale
         self.pos_p = pos_threshold
@@ -252,25 +252,22 @@ class SiameseNet(nn.Module):
         
         # feature extractor
         self.backbone = nn.Sequential(
-            nn.Linear(input_dim, 128),
-            nn.BatchNorm1d(128),
-            nn.ReLU(),
-            nn.Linear(128, 256),
-            nn.BatchNorm1d(256),
+            nn.Linear(input_dim, 64),
+            nn.BatchNorm1d(64),
             nn.ReLU()
         )
 
         # mu head
         self.mu_head = nn.Sequential(
-            nn.Linear(256, 256),
-            nn.BatchNorm1d(256),
+            nn.Linear(64, 128),
+            nn.BatchNorm1d(128),
             nn.ReLU(),
-            nn.Linear(256, embedding_dim)
+            nn.Linear(128, embedding_dim)
         )
 
         # sigma head
         self.sigma_head = nn.Sequential(
-            nn.Linear(256, 128),
+            nn.Linear(64, 128),
             nn.BatchNorm1d(128),
             nn.ReLU(),
             nn.Linear(128, embedding_dim)
@@ -375,7 +372,7 @@ def train_model(model, dataloader, val_loader, optimizer, criterion, device, epo
             # save best model
             if avg_val_loss < best_loss:
                 best_loss = avg_val_loss
-                torch.save(model.state_dict(), '../models/pitch_embed.pth')
+                torch.save(model.state_dict(), '../models/pitcher_embed.pth')
         
         print(f"Epoch [{epoch + 1}/{epochs}], ValLoss: {avg_val_loss:.6f}, TrainLoss: {train_loss:.6f}, sigma: {sigma:.6f}")
     
@@ -434,28 +431,71 @@ def get_closest_embeddings(query_emb, embedding_database, k):
 
 # %% normalize based on gloabl statitics, not just batch subset
 def get_normalization_stats(dataset, device="cuda"):
-    loader = torch.utils.data.DataLoader(dataset, batch_size=256, shuffle=False)
-    # dists for global stats =
+    loader = torch.utils.data.DataLoader(dataset, batch_size=2048, shuffle=True)
+    
+    # dists for global stats 
     k_dists_list, cmd_dists_list = [], []
 
     for batch_features in loader:
         for k, v in batch_features.items():
             batch_features[k] = v.to(device)
-
+        
+        # feature weights
+        weights_dict = {
+            'vaa_diff': 0.07719401628733857,
+            'haa_diff': 0.088933057497284,
+            'effective_speed': 0.08040670227854997,
+            'ax': 0.07495841538536129,
+            'ay': 0.1593238757793289,
+            'az': 0.12804355247650187,
+            'arm_angle': 0.07956186876642489,
+            'release_height': 0.08793159987116557,
+            'release_x': 0.07079566880738072
+        }
+        cmd_weight = 0.15285124285066423
+        
+        # kmu 
+        kmu_order = ['vaa_diff', 'haa_diff', 'effective_speed', 'ax', 'ay', 'az', 
+                     'arm_angle', 'release_height', 'release_x']
+        
+        # weight tensor
+        feature_weights = torch.tensor([weights_dict[k] for k in kmu_order], device='cuda', dtype=torch.double)
+        k_weight_sum = feature_weights.sum().item()
+        
+        # covar weights
+        cov_scale_diag = torch.sqrt(feature_weights)
+        cov_scale_matrix = torch.diag_embed(cov_scale_diag)
+        
         # matrix log
         def matrix_log(sigma):
-            return SafeLog.apply(sigma)
+            try:
+                return SafeLog.apply(sigma)
+            except NameError:
+                return torch.matrix_power(sigma, 1) 
         
-        # same distance calculation as above
+        # extract and reshape
         kmu = batch_features["kmu"]
-        ksigma_log = matrix_log(batch_features["ksigma"])
+        ksigma = batch_features["ksigma"]
         avg_cmd = batch_features["cmd_value"].view(-1, 1)
-
-        k_mean_dist = torch.sum((kmu.unsqueeze(1) - kmu.unsqueeze(0)) ** 2, dim=2)
-        k_cov_dist = torch.sum((ksigma_log.unsqueeze(1) - ksigma_log.unsqueeze(0)) ** 2, dim=(2, 3))
-        k_dists = k_mean_dist + k_cov_dist
-
+        
+        # weighted covars based on feature importance
+        ksigma_weighted = cov_scale_matrix @ ksigma @ cov_scale_matrix
+        ksigma_log = matrix_log(ksigma_weighted)
+        
+        # weighted mean distances
+        w_reshaped = feature_weights.view(1, 1, -1)
+        diff_sq = (kmu.unsqueeze(1) - kmu.unsqueeze(0)) ** 2
+        k_mean_dist = torch.sum(w_reshaped * diff_sq, dim=2)
+        
+        # covarience distance
+        k_cov_dist = torch.sum(
+            (ksigma_log.unsqueeze(1) - ksigma_log.unsqueeze(0)) ** 2, dim=(2, 3)
+        )
+        # combined distance
+        k_dists = (k_mean_dist + k_cov_dist) * k_weight_sum
         cmd_dists = (avg_cmd - avg_cmd.T) ** 2
+        cmd_dists = cmd_dists * cmd_weight
+        
         k_dists_list.append(k_dists.detach().view(-1))
         cmd_dists_list.append(cmd_dists.detach().view(-1))
 
@@ -466,9 +506,11 @@ def get_normalization_stats(dataset, device="cuda"):
 # %% data loaders
 input = pl.read_parquet("cleaned_data/embed/pitch_mu_cov.parquet")
 dataset = ManifoldDataset(df=input)
+
 # train and val
 train_size = int(0.80 * len(dataset))
 val_size = len(dataset) - train_size
+
 # split into train and val
 train_dataset, val_dataset = random_split(
     dataset, 
@@ -479,18 +521,18 @@ train_dataset, val_dataset = random_split(
 # norm on only train data
 normalization_stats = get_normalization_stats(train_dataset, device="cuda")
 # dataloaders
-train_loader = DataLoader(train_dataset, batch_size=512, shuffle=True)
-val_loader = DataLoader(val_dataset, batch_size=512, shuffle=False)
+train_loader = DataLoader(train_dataset, batch_size=128, shuffle=True)
+val_loader = DataLoader(val_dataset, batch_size=128, shuffle=False)
 
 # %% model params
 embedding_dim = 64 # effectively 32
 model = SiameseNet(input_dim=10, embedding_dim=embedding_dim)
-optimizer = torch.optim.AdamW(model.parameters(), lr=0.00001, weight_decay=0.01)
+optimizer = torch.optim.AdamW(model.parameters(), lr=0.0001, weight_decay=0.01)
 criterion = TripletLoss()  # default params in method sig
 
 # %% train, returns last iter model
 trained_model = train_model(model, train_loader, val_loader, optimizer, 
-                criterion, device="cuda", epochs=50, normalization_stats=normalization_stats)
+                criterion, device="cuda", epochs=20, normalization_stats=normalization_stats)
 
 # %% clean env
 torch.cuda.empty_cache()
@@ -498,7 +540,7 @@ gc.collect()
 
 # %% load saved best model
 best_model = SiameseNet(input_dim=10, embedding_dim=embedding_dim)
-dict = torch.load('../models/pitch_embed.pth', weights_only=True)
+dict = torch.load('../models/pitcher_embed.pth', weights_only=True)
 best_model.load_state_dict(dict)
 
 # %% infrence and closeness

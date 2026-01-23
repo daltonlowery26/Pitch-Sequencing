@@ -74,8 +74,8 @@ print(df_t.height)
 # %% feature importances
 X = df_t.select(features)
 y = df_t.select(['pitch_value'])
-best_params = {'subsample': np.float64(0.9124999999999999), 'reg_lambda': 35, 'n_estimators': np.int64(7600), 
-    'min_child_weight': np.int64(40), 'max_depth': np.int64(10), 'learning_rate': 0.01, 'colsample_bytree': 1}
+best_params = {'subsample':0.9124999999999999, 'reg_lambda': 10, 
+        'n_estimators': 941, 'min_child_weight': 18, 'max_depth': 10, 'learning_rate': 0.01, 'colsample_bytree': 1}
 
 # %% importances
 results = {key: [] for key in features}
