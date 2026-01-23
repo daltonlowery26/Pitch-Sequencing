@@ -8,7 +8,7 @@ os.chdir("C:/Users/dalto/OneDrive/Pictures/Documents/Projects/Coding Projects/Op
 df = (pl.scan_csv('cleaned_data/pitch_ft_2326.csv')
         .select(['pitcher_name', 'pitcher_id', 'p_throws', 'pitch_name', 'game_year',
         'vaa', 'haa', 'effective_speed', 'release_speed', 'az', 'ay', 'ax', 'release_extension', 
-        'arm_angle', 'release_height', 'release_x', 'plate_x', 'plate_z'])
+        'arm_angle', 'release_height'])
         .drop_nulls()).collect(engine="streaming")
 
 
@@ -43,4 +43,4 @@ df = df.with_columns(
 # %% 
 df = df.drop_nulls()
 # %% adj export
-df.write_parquet('cleaned_data/embed/loc_adj.parquet')
+df.write_parquet('cleaned_data/embed/input/loc_adj.parquet')

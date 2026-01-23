@@ -12,7 +12,6 @@ import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader, random_split
 from sklearn.manifold import TSNE
 from scipy.spatial.distance import cdist
-import ot
 os.chdir("C:/Users/dalto/OneDrive/Pictures/Documents/Projects/Coding Projects/Optimal Pitch/data/")
 
 # %% numerical stability utlis arising from handling of covar matrices
@@ -64,21 +63,13 @@ def make_spd(matrix, eps=1e-6):
 
 # %% efficent distance
 def relative_distance(batch_features, normalization_stats):
-    weights_dict = {
-        'vaa_diff': 0.07719401628733857,
-        'haa_diff': 0.088933057497284,
-        'effective_speed': 0.08040670227854997,
-        'ax': 0.07495841538536129,
-        'ay': 0.1593238757793289,
-        'az': 0.12804355247650187,
-        'arm_angle': 0.07956186876642489,
-        'release_height': 0.08793159987116557,
-        'release_x': 0.07079566880738072
-    }
-    cmd_weight = 0.15285124285066423
+    weights_dict = {'vaa_diff': np.float32(0.07331265), 'haa_diff': np.float32(0.07780298), 'release_speed': np.float32(0.08941311),
+        'release_extension': np.float32(0.090783864), 'ax': np.float32(0.09481193), 'ay': np.float32(0.09528503), 'az': np.float32(0.104321584), 
+        'arm_angle': np.float32(0.088479534), 'release_height': np.float32(0.08340817), 'release_x': np.float32(0.088434786)}
+    cmd_weight = 0.11394637
     
     # kmu 
-    kmu_order = ['vaa_diff', 'haa_diff', 'effective_speed', 'ax', 'ay', 'az', 
+    kmu_order = ['vaa_diff', 'haa_diff', 'release_speed', 'release_extension', 'ax', 'ay', 'az', 
                  'arm_angle', 'release_height', 'release_x']
     
     # weight tensor, reorder to same as cols
@@ -317,22 +308,17 @@ def train_model(model, dataloader, val_loader, optimizer, criterion, device, epo
         model.train()
         total_loss = 0.0
         total_sigma_mag = 0.0
-        
         # loop through data loader
         for batch_idx, batch_features in enumerate(dataloader):
-            
             # batch features
             for k, v in batch_features.items():
                 batch_features[k] = v.to(device)
             optimizer.zero_grad()
-            
             # forward pass create
             embeddings = model(batch_features["input_emb"])
-            
             # ground truth distances, based on gt distance
             with torch.no_grad():
                 gt_distances = relative_distance(batch_features, normalization_stats)
-            
             # find sigma val so model doesnt just explode sigma
             dim = embeddings.shape[1] // 2
             sigma_val = embeddings[:, dim:]
@@ -441,21 +427,13 @@ def get_normalization_stats(dataset, device="cuda"):
             batch_features[k] = v.to(device)
         
         # feature weights
-        weights_dict = {
-            'vaa_diff': 0.07719401628733857,
-            'haa_diff': 0.088933057497284,
-            'effective_speed': 0.08040670227854997,
-            'ax': 0.07495841538536129,
-            'ay': 0.1593238757793289,
-            'az': 0.12804355247650187,
-            'arm_angle': 0.07956186876642489,
-            'release_height': 0.08793159987116557,
-            'release_x': 0.07079566880738072
-        }
-        cmd_weight = 0.15285124285066423
+        weights_dict = {'vaa_diff': np.float32(0.07331265), 'haa_diff': np.float32(0.07780298), 'release_speed': np.float32(0.08941311),
+            'release_extension': np.float32(0.090783864), 'ax': np.float32(0.09481193), 'ay': np.float32(0.09528503), 'az': np.float32(0.104321584), 
+            'arm_angle': np.float32(0.088479534), 'release_height': np.float32(0.08340817), 'release_x': np.float32(0.088434786)}
+        cmd_weight = 0.11394637
         
         # kmu 
-        kmu_order = ['vaa_diff', 'haa_diff', 'effective_speed', 'ax', 'ay', 'az', 
+        kmu_order = ['vaa_diff', 'haa_diff', 'release_speed', 'release_extension', 'ax', 'ay', 'az', 
                      'arm_angle', 'release_height', 'release_x']
         
         # weight tensor
@@ -504,7 +482,7 @@ def get_normalization_stats(dataset, device="cuda"):
     return k_mean, cmd_mean
 
 # %% data loaders
-input = pl.read_parquet("cleaned_data/embed/pitch_mu_cov.parquet")
+input = pl.read_parquet("cleaned_data/embed/input/pitch_mu_cov.parquet")
 dataset = ManifoldDataset(df=input)
 
 # train and val
@@ -520,13 +498,14 @@ train_dataset, val_dataset = random_split(
 
 # norm on only train data
 normalization_stats = get_normalization_stats(train_dataset, device="cuda")
+
 # dataloaders
 train_loader = DataLoader(train_dataset, batch_size=128, shuffle=True)
 val_loader = DataLoader(val_dataset, batch_size=128, shuffle=False)
 
 # %% model params
 embedding_dim = 64 # effectively 32
-model = SiameseNet(input_dim=10, embedding_dim=embedding_dim)
+model = SiameseNet(input_dim=11, embedding_dim=embedding_dim)
 optimizer = torch.optim.AdamW(model.parameters(), lr=0.0001, weight_decay=0.01)
 criterion = TripletLoss()  # default params in method sig
 
@@ -539,7 +518,7 @@ torch.cuda.empty_cache()
 gc.collect()
 
 # %% load saved best model
-best_model = SiameseNet(input_dim=10, embedding_dim=embedding_dim)
+best_model = SiameseNet(input_dim=11, embedding_dim=embedding_dim)
 dict = torch.load('../models/pitcher_embed.pth', weights_only=True)
 best_model.load_state_dict(dict)
 

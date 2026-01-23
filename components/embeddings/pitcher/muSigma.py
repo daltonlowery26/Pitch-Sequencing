@@ -16,17 +16,20 @@ features = [
 df = df.with_columns(
     (pl.col(features) - pl.col(features).mean()) / pl.col(features).std()
 )
+df = df.with_columns(
+    pl.col(features).cast(pl.Float64)
+)
     
 # %% disturbtion and comparison
 def params(df_pitcher):
     # kinematic features
-    features = ['vaa_diff', 'haa_diff', 'effective_speed', 'ax', 'ay', 'az', 
+    features = ['vaa_diff', 'haa_diff', 'release_speed', 'release_extension', 'ax', 'ay', 'az', 
                 'arm_angle', 'release_height', 'release_x']
     data = df_pitcher[features].to_numpy()
     # mean and covar
     mu = np.mean(data, axis=0)
     sigma = np.cov(data, rowvar=False)
-    return mu, sigma.flatten()
+    return mu.tolist(), sigma.flatten().tolist()
 
 # %% release and kinematic
 data = []
@@ -56,7 +59,6 @@ mu_cov = mu_cov.join(cmd.select(['pitcher_name', 'pitch_name', 'pitcher_id', 'ga
 mu_cov = mu_cov.drop_nulls()
 
 # %% parquet
-print(mu_cov)
 mu_cov.write_parquet('cleaned_data/embed/input/pitch_mu_cov.parquet')
 
 # %% compare pitchers
