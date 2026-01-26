@@ -5,8 +5,8 @@ import os
 os.chdir("C:/Users/dalto/OneDrive/Pictures/Documents/Projects/Coding Projects/Optimal Pitch/data/")
 
 input = (pl.scan_csv('cleaned_data/pitch_ft_2326.csv')
-    .select(['pitcher_name', 'pitcher_id', 'batter_name', 'batter_id', 'pitch_number', 'pitch_name','game_pk', 'at_bat_number', 
-                    'hra', 'vra', 'effective_speed', 'arm_angle', 'release_extension', 'release_speed',
+    .select(['pitcher_name', 'pitcher_id', 'batter_name', 'batter_id', 'game_year','pitch_number', 'pitch_name','game_pk', 'at_bat_number', 
+                    'hra', 'vra', 'effective_speed', 'arm_angle', 'release_extension', 'release_speed', 
                     'vx0', 'ax', 'vz0', 'az', 'release_height', 'release_x', 'ay', 'description', 'plate_x', 'plate_z',
                     'delta_run_exp', 'pitch_value', 'swing', 'abs_strike', 'count', 'attack_angle', 'attack_direction', 
                     'swing_path_tilt', 'bat_speed', 'swing_length']).collect(engine="streaming")

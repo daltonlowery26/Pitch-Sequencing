@@ -1,35 +1,34 @@
-# %% packages
-import os
+# %% package
 import gc
 import numpy as np
 import polars as pl
-import polars.selectors as cs
 import matplotlib.pyplot as plt
-import seaborn as sns
+import seaborn
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader, random_split
-from sklearn.manifold import TSNE
-from sklearn.neighbors import NearestNeighbors
+import os
+os.chdir("C:/Users/dalto/OneDrive/Pictures/Documents/Projects/Coding Projects/Optimal Pitch/data/")
 
 # %% efficent distance
 def relative_distance(batch_features, normalization_stats):
     # feature weights
     weights_dict = {'hra': np.float32(0.04389879), 'vra': np.float32(0.07689403),
-    'release_speed': np.float32(0.041228697), 'release_extension': np.float32(0.016441599), 
-    'arm_angle': np.float32(0.028466891), 'release_height': np.float32(0.07069921), 
-    'release_x': np.float32(0.21362221), 'deltax': np.float32(0.22568145), 'deltaz': np.float32(0.14427924), 
+    'release_speed': np.float32(0.041228697), 'release_extension': np.float32(0.016441599),
+    'arm_angle': np.float32(0.028466891), 'release_height': np.float32(0.07069921),
+    'release_x': np.float32(0.21362221), 'deltax': np.float32(0.22568145), 'deltaz': np.float32(0.14427924),
     'midx': np.float32(0.060674995), 'midz': np.float32(0.03618689), 'ay': np.float32(0.04192603)}
+
 
     # extract and reshape
     kmu = batch_features["kmu"]
     kmu_order = ['hra', 'vra', 'release_speed', 'release_extension', 'arm_angle', 'release_height',
-                'release_x', 'deltax', 'deltaz', 'midx', 'midz' 'ay']
+                'release_x', 'deltax', 'deltaz', 'midx', 'midz', 'ay']
 
     # weight tensor
     feature_weights = torch.tensor([weights_dict[k] for k in kmu_order], device='cuda', dtype=torch.double)
 
-    # simple eucledian distanced
+    # simple eucledian distance
     w_reshaped = feature_weights.view(1, 1, -1)
     diff_sq = (kmu.unsqueeze(1) - kmu.unsqueeze(0)) ** 2
     k_mean_dist = torch.sum(w_reshaped * diff_sq, dim=2)
@@ -41,7 +40,7 @@ def relative_distance(batch_features, normalization_stats):
 
 # %% triplet loss, with hard mining
 class TripletLoss(nn.Module):
-    def __init__(self, lambda_scale=4.0, pos_threshold=0.2, neg_threshold=0.8):
+    def __init__(self, lambda_scale=1.75, pos_threshold=0.2, neg_threshold=0.6):
         super(TripletLoss, self).__init__()
         self.lambda_scale = lambda_scale  # gt units to embedding units
         self.pos_p = pos_threshold  # take top x clostest
@@ -132,22 +131,23 @@ class ManifoldDataset(Dataset):
             "kmu": self.kmu_target[idx]
         }
 
-# %% residual network
+# %% residual
 class resBlock(nn.Module):
     def __init__(self, dim, dropout):
       super().__init__()
+
       # layer
       self.block = nn.Sequential(
-            nn.BatchNorm1d(dim),     
-            nn.ReLU(),                
-            nn.Linear(dim, dim),      
-            nn.BatchNorm1d(dim),      
+            nn.BatchNorm1d(dim),
+            nn.ReLU(),
+            nn.Linear(dim, dim),
+            nn.BatchNorm1d(dim),
             nn.ReLU(),
             nn.Dropout(dropout),
             nn.Linear(dim, dim)
       )
-      def forward(self, x):
-        return x + self.block(x)
+    def forward(self, x):
+      return x + self.block(x)
 
 class SiameseNet(nn.Module):
     def __init__(self, input_dim, dim, embedding_dim=32):
@@ -156,15 +156,45 @@ class SiameseNet(nn.Module):
         # layers and input dim
         self.input_proj = nn.Linear(input_dim, dim)
         self.layers = nn.ModuleList([
-            resBlock(dim, 0.1) for _ in range(8)
+            resBlock(dim, 0.05) for _ in range(24)
         ])
+        self.o_activ = nn.ReLU()
+        self.o_norm = nn.BatchNorm1d(dim)
         self.output = nn.Linear(dim, embedding_dim)
+
     def forward(self, x):
         x = self.input_proj(x)
         for layer in self.layers:
             x = layer(x)
+        # normalize for final layer
+        x = self.o_norm(x)
+        x = self.o_activ(x)
         embeddings = self.output(x)
         return torch.nn.functional.normalize(embeddings, p=2, dim=1)
+
+# weight intilization
+def init_resnet(m):
+  # he init init standard for RELU
+  def he_init_weights(m):
+      if isinstance(m, nn.Linear):
+          nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+          if m.bias is not None:
+              nn.init.constant_(m.bias, 0)
+      elif isinstance(m, nn.BatchNorm1d):
+        nn.init.constant_(m.weight, 1)
+        nn.init.constant_(m.bias, 0)
+
+  # apply he globally
+  he_init_weights(m)
+
+  # standard zero init for last layer of resnet, preserves signal flow
+  if isinstance(m, resBlock):
+      nn.init.constant_(m.block[6].weight, 0)
+      nn.init.constant_(m.block[6].bias, 0)
+  elif isinstance(m, nn.BatchNorm1d):
+      # standard batch norm weights
+      nn.init.constant_(m.weight, 1)
+      nn.init.constant_(m.bias, 0)
 
 # %% train loop
 def train_model(model, dataloader, val_loader, optimizer, criterion, device, epochs, normalization_stats):
@@ -266,16 +296,16 @@ def get_closest_embeddings(query_emb, embedding_database, k):
 
 # %% normalize based on gloabl statitics, not just batch subset
 def get_normalization_stats(dataset, device="cuda"):
-    loader = torch.utils.data.DataLoader(dataset, batch_size=6000, shuffle=True)
+    loader = torch.utils.data.DataLoader(dataset, batch_size=256, shuffle=True)
     # weights dict
-    weights_dict =  {'hra': np.float32(0.04389879), 'vra': np.float32(0.07689403),
-    'release_speed': np.float32(0.041228697), 'release_extension': np.float32(0.016441599), 
-    'arm_angle': np.float32(0.028466891), 'release_height': np.float32(0.07069921), 
-    'release_x': np.float32(0.21362221), 'deltax': np.float32(0.22568145), 'deltaz': np.float32(0.14427924), 
+    weights_dict = {'hra': np.float32(0.04389879), 'vra': np.float32(0.07689403),
+    'release_speed': np.float32(0.041228697), 'release_extension': np.float32(0.016441599),
+    'arm_angle': np.float32(0.028466891), 'release_height': np.float32(0.07069921),
+    'release_x': np.float32(0.21362221), 'deltax': np.float32(0.22568145), 'deltaz': np.float32(0.14427924),
     'midx': np.float32(0.060674995), 'midz': np.float32(0.03618689), 'ay': np.float32(0.04192603)}
-   
-    kmu_order = ['hra', 'vra', 'release_speed', 'release_extension', 'arm_angle', 'release_height',
-                'release_x', 'deltax', 'deltaz', 'midx', 'midz' 'ay']
+
+    kmu_order = ['hra', 'vra', 'release_speed', 'release_extension','arm_angle', 'release_height',
+                'release_x', 'deltax', 'deltaz', 'midx', 'midz' ,'ay']
     # weight tensor
     feature_weights = torch.tensor([weights_dict[k] for k in kmu_order], device=device, dtype=torch.float32)
     w_reshaped = feature_weights.view(1, 1, -1)
@@ -294,15 +324,15 @@ def get_normalization_stats(dataset, device="cuda"):
     # mean of weighted distances
     k_mean = torch.cat(k_dists_list).mean()
     return k_mean
-    
-    
-# %%input
-input = pl.read_parquet('../../data/cleaned_data/embed/input/pitch.parquet')
-input = input.drop_nulls()
+
+# %% input
+input = pl.read_parquet('cleaned_data/embed/input/pitch.parquet')
 features = [
     'hra', 'vra', 'release_speed', 'release_extension', 'arm_angle',
-    'release_height', 'release_x', 'deltax', 'deltaz', 'midx', 'midz' 'ay'
+    'release_height', 'release_x', 'deltax', 'deltaz', 'midx', 'midz', 'ay'
 ]
+input = input.drop_nulls(subset=features)
+print(input.columns)
 # normalize
 input = input.with_columns(
     kmu = pl.concat_list(
@@ -310,10 +340,11 @@ input = input.with_columns(
     )
 )
 
-# %% data loaders and model specficiations
+# %% data loaders
 dataset = ManifoldDataset(df=input)
+
 # train and val
-train_size = int(0.80 * len(dataset))
+train_size = int(0.9 * len(dataset))
 val_size = len(dataset) - train_size
 # split into train and val
 train_dataset, val_dataset = random_split(
@@ -321,16 +352,23 @@ train_dataset, val_dataset = random_split(
     [train_size, val_size],
     generator=torch.Generator().manual_seed(26)
 )
+
 # norm on only train data
 normalization_stats = get_normalization_stats(train_dataset, device="cuda")
+
 # dataloaders
-train_loader = DataLoader(train_dataset, batch_size=4096, shuffle=True)
-val_loader = DataLoader(val_dataset, batch_size=4096, shuffle=False)
-# model, opti, loss function
-embedding_dim = 32
-model = SiameseNet(input_dim=11, dim=64, embedding_dim=embedding_dim)
-optimizer = torch.optim.AdamW(model.parameters(), lr=0.0001, weight_decay=0.01)
+train_loader = DataLoader(train_dataset, batch_size=256, shuffle=True)
+val_loader = DataLoader(val_dataset, batch_size=256, shuffle=False)
+
+# %% model params
+embedding_dim = 64
+model = SiameseNet(input_dim=12, dim = 256, embedding_dim=embedding_dim)
+model.apply(init_resnet)
+optimizer = torch.optim.AdamW(model.parameters(), lr=0.01, weight_decay=0.001)
 criterion = TripletLoss()  # default params in method sig
+
+# %% parameter count
+sum(p.numel() for p in model.parameters())
 
 # %% train, returns last iter model
 trained_model = train_model(model, train_loader, val_loader, optimizer,
@@ -341,27 +379,28 @@ torch.cuda.empty_cache()
 gc.collect()
 
 # %% load saved best model
-best_model = SiameseNet(input_dim=11, dim = 64, embedding_dim=embedding_dim)
+model = SiameseNet(input_dim=12, dim = 256, embedding_dim=embedding_dim)
 dict = torch.load('../models/pitch.pth', weights_only=True)
-best_model.load_state_dict(dict)
+model.load_state_dict(dict)
 
 # %% infrence and closeness
 inference_loader = torch.utils.data.DataLoader(dataset, batch_size=64, shuffle=False)
-embeddings = get_embeddings(model=best_model, dataloader=inference_loader, device="cuda")
+embeddings = get_embeddings(model=model, dataloader=inference_loader, device="cuda")
 
 # embeddings
 input = pl.concat(
     [input, pl.from_numpy(embeddings, schema=["embeds"])], 
     how="horizontal"
 )
-input.write_parquet('../../data/cleaned_data/embed/output/pitch_embeded.parquet')
+# %% save pitch embeddings
+input.write_parquet('cleaned_data/embed/output/pitch_embeded.parquet')
 
-
-# %% tsne visual tool
-def tsne_viz(color_col):
+# %% umap visual tool
+def umap_viz(color_col):
+    import umap
     color_col = color_col
     # tsne dim reduction
-    reducer = TSNE(n_components=2, metric='cosine', init='pca', learning_rate='auto', random_state=42)
+    reducer = umap.UMAP(n_components=2, metric='cosine')
     tsne_coords = reducer.fit_transform(embeddings)
     # raw data with info
     plot_data = input.select(pl.col(color_col)).to_pandas()
@@ -378,7 +417,7 @@ def tsne_viz(color_col):
     plt.show()
 
 # %% throws
-tsne_viz('p_throws')
+umap_viz('p_throws')
 
 # %% tsne by pitch type
 types = {
@@ -393,4 +432,5 @@ types = {
 mapping = {v: k for k, values in types.items() for v in values}
 input = input.with_columns(
     pitch_group = pl.col("pitch_name").replace(mapping))
-tsne_viz('pitch_group')
+
+umap_viz('pitch_group')

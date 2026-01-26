@@ -1,6 +1,7 @@
 # embeddings to represent how a pitcher is precived, a prior context embedding
 # %% packages
 import os
+import umap
 import gc
 import numpy as np
 import polars as pl
@@ -10,7 +11,6 @@ import seaborn as sns
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader, random_split
-from sklearn.manifold import TSNE
 from scipy.spatial.distance import cdist
 os.chdir("C:/Users/dalto/OneDrive/Pictures/Documents/Projects/Coding Projects/Optimal Pitch/data/")
 
@@ -130,7 +130,7 @@ def relative_distance(batch_features, normalization_stats):
 
 # %% triplet loss, with hard mining
 class TripletLoss(nn.Module):
-    def __init__(self, lambda_scale=1.5, pos_threshold=0.2, neg_threshold=0.8):
+    def __init__(self, lambda_scale=1, pos_threshold=0.2, neg_threshold=0.8):
         super(TripletLoss, self).__init__()
         self.lambda_scale = lambda_scale
         self.pos_p = pos_threshold
@@ -287,7 +287,6 @@ class SiameseNet(nn.Module):
     def forward(self, x):
         # extract shared features
         shared_features = self.backbone(x)
-        
         # mean
         mu = self.mu_head(shared_features)
         mu = torch.nn.functional.normalize(mu, p=2, dim=1)
@@ -322,9 +321,11 @@ def train_model(model, dataloader, val_loader, optimizer, criterion, device, epo
             # find sigma val so model doesnt just explode sigma
             dim = embeddings.shape[1] // 2
             sigma_val = embeddings[:, dim:]
+            sigma_loss = (sigma_val.mean().item()) * 0.1
             
             # triplet loss
             loss = criterion(embeddings, gt_distances)
+            loss = loss + sigma_loss
             # backward pass
             if loss.requires_grad:
                 loss.backward()
@@ -504,10 +505,11 @@ train_loader = DataLoader(train_dataset, batch_size=128, shuffle=True)
 val_loader = DataLoader(val_dataset, batch_size=128, shuffle=False)
 
 # %% model params
-embedding_dim = 64 # effectively 32
+embedding_dim = 32 # effectively 32
 model = SiameseNet(input_dim=11, embedding_dim=embedding_dim)
 optimizer = torch.optim.AdamW(model.parameters(), lr=0.0001, weight_decay=0.01)
 criterion = TripletLoss()  # default params in method sig
+sum(p.numel() for p in model.parameters())
 
 # %% train, returns last iter model
 trained_model = train_model(model, train_loader, val_loader, optimizer, 
@@ -643,10 +645,10 @@ for columns in input.select(cs.numeric()).columns:
     print(f'{columns} std: {input[columns].std()}')
 
 # %% tsne visual tool
-def tsne_viz(color_col):
+def umap_viz(color_col):
     color_col = color_col
     # tsne dim reduction
-    reducer = TSNE(n_components=2, metric='cosine', init='pca', learning_rate='auto', random_state=42)
+    reducer = umap.UMAP(n_components=2, metric ='cosine')
     tsne_coords = reducer.fit_transform(embeddings)
     # raw data with info
     plot_data = input.select(pl.col(color_col)).to_pandas()
@@ -663,7 +665,7 @@ def tsne_viz(color_col):
     plt.show()
 
 # %% throws
-tsne_viz('p_throws')
+umap_viz('p_throws')
 
 # %% tsne by pitch type
 types = {
@@ -680,10 +682,10 @@ mapping = {v: k for k, values in types.items() for v in values}
 input = input.with_columns(
     pitch_group = pl.col("pitch_name").replace(mapping)
 )
-tsne_viz('pitch_group')
+umap_viz('pitch_group')
 
 # %% run value
-tsne_viz('rv_100')
+umap_viz('rv_100')
 
 # %% use wassermans metric and optimal transport to calculate areseal similairty
 def arsenal_distance(emb_A, usage_A, emb_B, usage_B):
