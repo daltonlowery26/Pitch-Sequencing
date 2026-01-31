@@ -305,7 +305,6 @@ input = input.with_columns(
 
 # %% data loaders
 dataset = ManifoldDataset(df=input)
-
 # train and val
 train_size = int(0.9 * len(dataset))
 val_size = len(dataset) - train_size
