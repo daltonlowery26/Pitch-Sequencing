@@ -6,7 +6,8 @@ import polars as pl
 import xgboost as xgb
 from sklearn.model_selection import PredefinedSplit, RandomizedSearchCV, train_test_split
 os.chdir("C:/Users/dalto/OneDrive/Pictures/Documents/Projects/Coding Projects/Optimal Pitch/data/")
-df = pl.read_parquet('cleaned_data/embed/pitch.parquet')
+df = pl.scan_parquet('cleaned_data/embed/pitch.parquet').select('hra', 'vra', 'release_speed', 'release_extension', 'arm_angle', 'release_height',
+            'release_x', 'deltax', 'deltaz', 'midx', 'midz', 'ay', 'swing')
 df = df.sample(n=500000, shuffle=True)
 print(df.columns)
 
@@ -36,9 +37,9 @@ def train(X, y, seed):
     split_index = [-1] * len(x_train) + [0] * len(x_val2)
     pds = PredefinedSplit(test_fold=split_index)
     # reg model
-    model = xgb.XGBRegressor(
-        objective="reg:squarederror",
-        device="cpu",
+    model = xgb.XGBClassifier(
+        objective="binary:logistic",
+        device="gpu",
         random_state=seed,
         early_stopping_rounds=30,
         n_jobs=4,
@@ -48,7 +49,7 @@ def train(X, y, seed):
         model,
         param_distributions=rnd_search_params,
         cv=pds,
-        scoring="neg_root_mean_squared_error",
+        scoring="neg_log_loss",
         n_iter=50,
         random_state=seed,
         verbose=1,
@@ -67,15 +68,15 @@ def train(X, y, seed):
     return best_params
 
 # %% train features
-features = ['hra', 'vra', 'effective_speed', 'arm_angle', 'release_height',
-            'release_x', 'deltax', 'deltaz', 'ay']
-df_t = df.drop_nulls()
-print(df_t.height)
+features = ['hra', 'vra', 'release_speed', 'release_extension', 'arm_angle', 'release_height',
+            'release_x', 'deltax', 'deltaz', 'midx', 'midz', 'ay']
+df_t = df.drop_nulls(subset=features)
+df_t = df.drop_nulls(subset=pl.col('swing'))
+
 # %% feature importances
 X = df_t.select(features)
-y = df_t.select(['pitch_value'])
-best_params = {'subsample':0.9124999999999999, 'reg_lambda': 10, 
-        'n_estimators': 941, 'min_child_weight': 18, 'max_depth': 10, 'learning_rate': 0.01, 'colsample_bytree': 1}
+y = df_t.select(pl.col('swing'))
+best_params = train(X, y, seed=26)
 
 # %% importances
 results = {key: [] for key in features}
@@ -91,10 +92,10 @@ for i in range(15):
         x_val, y_val, test_size=0.5, random_state=seed, shuffle=True
     )
     # model with random seed
-    fmodel = xgb.XGBRegressor(
-        objective="reg:squarederror",
+    fmodel = xgb.XGBClassifier(
+        objective="binary:logistic",
         tree_method="hist",
-        device="cpu",
+        device="gpu",
         random_state=seed,
         early_stopping_rounds=30,
         n_jobs=6,
@@ -119,3 +120,8 @@ mean_dict = {f: np.mean(results[f]) for f in features}
 total_sum = sum(mean_dict.values())
 ft_percentages = {f: mean_dict[f]/total_sum for f in features}
 print(ft_percentages)
+
+# for swing can we rmeove release speed, release extension and arm angle
+#{'hra': np.float32(0.10538434), 'vra': np.float32(0.085907884), 'release_speed': np.float32(0.025862675), 'release_extension': np.float32(0.011928053), 
+# 'arm_angle': np.float32(0.022408163), 'release_height': np.float32(0.08632923), 'release_x': np.float32(0.22953443), 'deltax': np.float32(0.19865987), 
+# 'deltaz': np.float32(0.1288193), 'midx': np.float32(0.035057236), 'midz': np.float32(0.059057135), 'ay': np.float32(0.011051697)}

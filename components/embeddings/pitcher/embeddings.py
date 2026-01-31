@@ -662,6 +662,7 @@ def umap_viz(color_col):
     plt.title(f"UMAP Projection of Embeddings (Colored by {color_col})")
     plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left', title=color_col)
     plt.tight_layout()
+    plt.savefig('pPitchThrows.png')
     plt.show()
 
 # %% throws

@@ -3,7 +3,7 @@ import gc
 import numpy as np
 import polars as pl
 import matplotlib.pyplot as plt
-import seaborn
+import seaborn as sns
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader, random_split
@@ -13,17 +13,12 @@ os.chdir("C:/Users/dalto/OneDrive/Pictures/Documents/Projects/Coding Projects/Op
 # %% efficent distance
 def relative_distance(batch_features, normalization_stats):
     # feature weights
-    weights_dict = {'hra': np.float32(0.04389879), 'vra': np.float32(0.07689403),
-    'release_speed': np.float32(0.041228697), 'release_extension': np.float32(0.016441599),
-    'arm_angle': np.float32(0.028466891), 'release_height': np.float32(0.07069921),
-    'release_x': np.float32(0.21362221), 'deltax': np.float32(0.22568145), 'deltaz': np.float32(0.14427924),
-    'midx': np.float32(0.060674995), 'midz': np.float32(0.03618689), 'ay': np.float32(0.04192603)}
-
+    weights_dict = {'hra': np.float32(0.105568744), 'vra': np.float32(0.093146056), 'release_height': np.float32(0.09126035), 'release_x': np.float32(0.23855388),
+    'deltax': np.float32(0.21256568), 'deltaz': np.float32(0.15866818), 'midx': np.float32(0.041773327), 'midz': np.float32(0.058463812)}
 
     # extract and reshape
     kmu = batch_features["kmu"]
-    kmu_order = ['hra', 'vra', 'release_speed', 'release_extension', 'arm_angle', 'release_height',
-                'release_x', 'deltax', 'deltaz', 'midx', 'midz', 'ay']
+    kmu_order = ['hra', 'vra', 'release_height', 'release_x', 'deltax', 'deltaz', 'midx', 'midz', 'ay']
 
     # weight tensor
     feature_weights = torch.tensor([weights_dict[k] for k in kmu_order], device='cuda', dtype=torch.double)
@@ -150,14 +145,15 @@ class resBlock(nn.Module):
       return x + self.block(x)
 
 class SiameseNet(nn.Module):
-    def __init__(self, input_dim, dim, embedding_dim=32):
+    def __init__(self, input_dim, dim, embedding_dim):
         # inherit
         super(SiameseNet, self).__init__()
         # layers and input dim
         self.input_proj = nn.Linear(input_dim, dim)
         self.layers = nn.ModuleList([
-            resBlock(dim, 0.05) for _ in range(24)
+            resBlock(dim, 0.1) for _ in range(24)
         ])
+        
         self.o_activ = nn.ReLU()
         self.o_norm = nn.BatchNorm1d(dim)
         self.output = nn.Linear(dim, embedding_dim)
@@ -171,30 +167,6 @@ class SiameseNet(nn.Module):
         x = self.o_activ(x)
         embeddings = self.output(x)
         return torch.nn.functional.normalize(embeddings, p=2, dim=1)
-
-# weight intilization
-def init_resnet(m):
-  # he init init standard for RELU
-  def he_init_weights(m):
-      if isinstance(m, nn.Linear):
-          nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
-          if m.bias is not None:
-              nn.init.constant_(m.bias, 0)
-      elif isinstance(m, nn.BatchNorm1d):
-        nn.init.constant_(m.weight, 1)
-        nn.init.constant_(m.bias, 0)
-
-  # apply he globally
-  he_init_weights(m)
-
-  # standard zero init for last layer of resnet, preserves signal flow
-  if isinstance(m, resBlock):
-      nn.init.constant_(m.block[6].weight, 0)
-      nn.init.constant_(m.block[6].bias, 0)
-  elif isinstance(m, nn.BatchNorm1d):
-      # standard batch norm weights
-      nn.init.constant_(m.weight, 1)
-      nn.init.constant_(m.bias, 0)
 
 # %% train loop
 def train_model(model, dataloader, val_loader, optimizer, criterion, device, epochs, normalization_stats):
@@ -298,14 +270,10 @@ def get_closest_embeddings(query_emb, embedding_database, k):
 def get_normalization_stats(dataset, device="cuda"):
     loader = torch.utils.data.DataLoader(dataset, batch_size=256, shuffle=True)
     # weights dict
-    weights_dict = {'hra': np.float32(0.04389879), 'vra': np.float32(0.07689403),
-    'release_speed': np.float32(0.041228697), 'release_extension': np.float32(0.016441599),
-    'arm_angle': np.float32(0.028466891), 'release_height': np.float32(0.07069921),
-    'release_x': np.float32(0.21362221), 'deltax': np.float32(0.22568145), 'deltaz': np.float32(0.14427924),
-    'midx': np.float32(0.060674995), 'midz': np.float32(0.03618689), 'ay': np.float32(0.04192603)}
+    weights_dict = {'hra': np.float32(0.105568744), 'vra': np.float32(0.093146056), 'release_height': np.float32(0.09126035), 'release_x': np.float32(0.23855388),
+    'deltax': np.float32(0.21256568), 'deltaz': np.float32(0.15866818), 'midx': np.float32(0.041773327), 'midz': np.float32(0.058463812)}
 
-    kmu_order = ['hra', 'vra', 'release_speed', 'release_extension','arm_angle', 'release_height',
-                'release_x', 'deltax', 'deltaz', 'midx', 'midz' ,'ay']
+    kmu_order = ['hra', 'vra', 'release_height', 'release_x', 'deltax', 'deltaz', 'midx', 'midz' ,'ay']
     # weight tensor
     feature_weights = torch.tensor([weights_dict[k] for k in kmu_order], device=device, dtype=torch.float32)
     w_reshaped = feature_weights.view(1, 1, -1)
@@ -327,17 +295,12 @@ def get_normalization_stats(dataset, device="cuda"):
 
 # %% input
 input = pl.read_parquet('cleaned_data/embed/input/pitch.parquet')
-features = [
-    'hra', 'vra', 'release_speed', 'release_extension', 'arm_angle',
-    'release_height', 'release_x', 'deltax', 'deltaz', 'midx', 'midz', 'ay'
-]
+features = ['hra', 'vra', 'release_height', 'release_x', 'deltax', 'deltaz', 'midx', 'midz', 'ay']
 input = input.drop_nulls(subset=features)
-print(input.columns)
+
 # normalize
 input = input.with_columns(
-    kmu = pl.concat_list(
-        [(pl.col(f) - pl.col(f).mean()) / pl.col(f).std() for f in features]
-    )
+    kmu = pl.concat_list([(pl.col(f) - pl.col(f).mean()) / pl.col(f).std() for f in features])
 )
 
 # %% data loaders
@@ -346,6 +309,7 @@ dataset = ManifoldDataset(df=input)
 # train and val
 train_size = int(0.9 * len(dataset))
 val_size = len(dataset) - train_size
+
 # split into train and val
 train_dataset, val_dataset = random_split(
     dataset,
@@ -363,9 +327,8 @@ val_loader = DataLoader(val_dataset, batch_size=256, shuffle=False)
 # %% model params
 embedding_dim = 64
 model = SiameseNet(input_dim=12, dim = 256, embedding_dim=embedding_dim)
-model.apply(init_resnet)
 optimizer = torch.optim.AdamW(model.parameters(), lr=0.01, weight_decay=0.001)
-criterion = TripletLoss()  # default params in method sig
+criterion = TripletLoss() 
 
 # %% parameter count
 sum(p.numel() for p in model.parameters())
@@ -393,15 +356,16 @@ input = pl.concat(
     how="horizontal"
 )
 # %% save pitch embeddings
-input.write_parquet('cleaned_data/embed/output/pitch_embeded.parquet')
-
+#input.write_parquet('cleaned_data/embed/output/pitch_embeded.parquet')
+input = pl.read_parquet('cleaned_data/embed/output/pitch_embeded.parquet')
+print(input.columns)
 # %% umap visual tool
 def umap_viz(color_col):
     import umap
     color_col = color_col
     # tsne dim reduction
     reducer = umap.UMAP(n_components=2, metric='cosine')
-    tsne_coords = reducer.fit_transform(embeddings)
+    tsne_coords = reducer.fit_transform(input['embeds'])
     # raw data with info
     plot_data = input.select(pl.col(color_col)).to_pandas()
     plot_data['UMAP_1'] = tsne_coords[:, 0]
@@ -414,6 +378,7 @@ def umap_viz(color_col):
     plt.title(f"UMAP Projection of Embeddings (Colored by {color_col})")
     plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left', title=color_col)
     plt.tight_layout()
+    plt.savefig(f'{color_col}.png')
     plt.show()
 
 # %% throws
@@ -434,3 +399,6 @@ input = input.with_columns(
     pitch_group = pl.col("pitch_name").replace(mapping))
 
 umap_viz('pitch_group')
+
+# %%
+umap_viz('abs_strike')
