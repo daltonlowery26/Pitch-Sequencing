@@ -169,7 +169,7 @@ class UMAPLoss(nn.Module):
 
 
 class umapDataset(Dataset):
-    def __init__(self, df, n_neighbors, n_epochs):
+    def __init__(self, df, n_neighbors):
         # neighbors
         self.df = df
 
@@ -362,8 +362,8 @@ torch.cuda.empty_cache()
 
 # %% model train, train broad then train narrow
 # broad train
-trainDataset = umapDataset(train, n_neighbors=100, n_epochs=30)
-valDataset = umapDataset(test, n_neighbors=100, n_epochs=30)
+trainDataset = umapDataset(train, n_neighbors=100)
+valDataset = umapDataset(test, n_neighbors=100)
 opti = torch.optim.AdamW(model.parameters(), lr=0.01)
 lastModel = train(model = model, trainDataset=trainDataset, valDataset=valDataset, optimizer=opti,
                   umapLoss=umapLoss, reconLoss = reconLoss, reconW=1.0, batchsize = 32768, epochs = 6, type="b")
@@ -373,8 +373,8 @@ model = autoEncoder(input_dim=8, hidden_dim=512, dropout=0.15, layers=24, embedd
 model.load_state_dict(lDict)
 
 # narrow train
-trainDataset = umapDataset(train, n_neighbors=15, n_epochs=30)
-valDataset = umapDataset(test, n_neighbors=15, n_epochs=30)
+trainDataset = umapDataset(train, n_neighbors=15)
+valDataset = umapDataset(test, n_neighbors=15)
 opti = torch.optim.AdamW(model.parameters(), lr=0.001)
 lastModel = train(model = model, trainDataset=trainDataset, valDataset=valDataset, optimizer=opti,
                   umapLoss=umapLoss, reconLoss = reconLoss, reconW=1.0, batchsize = 32768, epochs = 15, type="n")

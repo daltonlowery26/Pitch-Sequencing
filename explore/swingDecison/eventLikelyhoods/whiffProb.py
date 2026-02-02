@@ -11,7 +11,7 @@ os.chdir('C:/Users/dalto/OneDrive/Pictures/Documents/Projects/Coding Projects/Op
 
 # load and select data
 swing_features = ['bat_speed', 'swing_length', 'swing_path_tilt', 'attack_angle', 'attack_direction', 'embed']
-df = (pl.scan_parquet('cleaned_data/embed/output/pitch_umap50.parquet').drop_nulls(subset=swing_features)).collect(engine="streaming")
+df = (pl.scan_parquet('cleaned_data/embed/output/pitch_umap150.parquet').drop_nulls(subset=swing_features)).collect(engine="streaming")
 xswing = pl.read_parquet('cleaned_data/metrics/xswing/swingTraits.parquet')
 xswing = xswing.select(pl.all().name.suffix('_x'))
 
@@ -242,7 +242,7 @@ torch.cuda.empty_cache()
 
 # %% model train
 model = train(model=model, dataLoader=train_loader, valLoader=val_loader, optimizer=opti, 
-            lossFunc=loss, mean=Tmean, std=Tstd, epochs=20)
+            lossFunc=loss, mean=Tmean, std=Tstd, epochs=10)
 
 # %% testing
 def test(model, testLoader, mean, std):
@@ -277,8 +277,8 @@ model.to('cuda')
 predictions, labels = test(model, test_loader, Tmean, Tstd)
 
 
-print(accuracy_score(labels, predictions > 0.5))
-print(f1_score(labels, predictions > 0.5))
+print(accuracy_score(labels, predictions > 0.4))
+print(f1_score(labels, predictions > 0.4))
 print(roc_auc_score(labels, predictions))
 # with umap k = 15
 # 0.7945076600343272
@@ -289,4 +289,21 @@ print(roc_auc_score(labels, predictions))
 #0.7976860975144618
 #0.39219281158091746
 #0.7317299344471266
+
+# umap mixed
+#0.7963384400228848
+#0.3305612436792177
+#0.7282632289422329
+
+# umap k = 150
+#0.7973936812662895
+#0.36671435383881734
+#0.7389210765082711
+
+# triplet
+#0.7936812662894921
+#0.41713957330651535
+#0.7326805959973623
+
+
 

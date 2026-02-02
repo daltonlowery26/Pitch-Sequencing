@@ -132,7 +132,7 @@ def train(model, dataLoader, valLoader, optimizer, lossFunc, epochs):
     return model
 
 # %% preparing data
-df = pl.scan_parquet('cleaned_data/embed/output/pitch_umap50.parquet').select(['embed', 'swing']).collect(engine="streaming")
+df = pl.scan_parquet('cleaned_data/embed/output/pitch_umap150.parquet').select(['embed', 'swing']).collect(engine="streaming")
 df = df.drop_nulls()
 
 # %% data 
@@ -199,6 +199,11 @@ predictions, labels = test(model, test_loader)
 print(accuracy_score(labels, predictions > 0.5))
 print(f1_score(labels, predictions > 0.5))
 print(roc_auc_score(labels, predictions))
+# triplet
+#0.734387244206071
+#0.7307306259722097
+#0.8090302785099025
+
 #k15
 #0.7380146869061305
 #0.7379458272121807
@@ -208,4 +213,17 @@ print(roc_auc_score(labels, predictions))
 #0.7381038406494146
 #0.7305207659401887
 #0.8144617030084979
+
+
+#k150
+#0.739492762123736
+#0.7387830767493507
+#0.8151301862219282
+
+# mixed
+#0.7377378410717218
+#0.7388712390207438
+#0.8137405174269587
+
+
 
