@@ -10,8 +10,8 @@ from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
 os.chdir('C:/Users/dalto/OneDrive/Pictures/Documents/Projects/Coding Projects/Optimal Pitch/data')
 
 # load and select data
-swing_features = ['bat_speed', 'swing_length', 'swing_path_tilt', 'attack_angle', 'attack_direction', 'embeds']
-df = (pl.scan_parquet('cleaned_data/embed/output/pitch_embeded.parquet').drop_nulls(subset=swing_features)).collect(engine="streaming")
+swing_features = ['bat_speed', 'swing_length', 'swing_path_tilt', 'attack_angle', 'attack_direction', 'embed']
+df = (pl.scan_parquet('cleaned_data/embed/output/pitch_umap50.parquet').drop_nulls(subset=swing_features)).collect(engine="streaming")
 xswing = pl.read_parquet('cleaned_data/metrics/xswing/swingTraits.parquet')
 xswing = xswing.select(pl.all().name.suffix('_x'))
 
@@ -106,7 +106,7 @@ class contactDataset(Dataset):
             return torch.tensor(df[col_name].to_list(), dtype=torch.float32)
 
         # extract from df
-        pitch_embeddings = col_to_tensor('embeds') # already normalized
+        pitch_embeddings = col_to_tensor('embed') # already normalized
         swing_traits = col_to_tensor('traits')
         label = col_to_tensor('contact')
 
@@ -207,7 +207,7 @@ def normStats(trainloader):
 df_s = df.filter(pl.col('swing'))
 df_s = df_s.with_columns(contact = ((pl.col('description') == 'swinging_strike_blocked') | ((pl.col('description') == 'swinging_strike') )).cast(pl.Int16))
 swing_traits = ['bat_speed_x', 'swing_length_x', 'swing_path_tilt_x', 'attack_angle_x', 'attack_direction_x']
-df_contact_train = df_s.select(['bat_speed_x', 'swing_length_x', 'swing_path_tilt_x', 'attack_angle_x', 'attack_direction_x', 'contact', 'embeds'])
+df_contact_train = df_s.select(['bat_speed_x', 'swing_length_x', 'swing_path_tilt_x', 'attack_angle_x', 'attack_direction_x', 'contact', 'embed'])
 df_contact_train = df_contact_train.with_columns(traits = pl.concat_list(swing_traits))
 
 # dataset
@@ -280,3 +280,13 @@ predictions, labels = test(model, test_loader, Tmean, Tstd)
 print(accuracy_score(labels, predictions > 0.5))
 print(f1_score(labels, predictions > 0.5))
 print(roc_auc_score(labels, predictions))
+# with umap k = 15
+# 0.7945076600343272
+# 0.3256706579331637
+# 0.7317099125219667
+
+# umap k = 50
+#0.7976860975144618
+#0.39219281158091746
+#0.7317299344471266
+

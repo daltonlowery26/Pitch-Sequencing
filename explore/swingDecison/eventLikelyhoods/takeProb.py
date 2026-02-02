@@ -62,7 +62,7 @@ class takeDataset(Dataset):
             return torch.tensor(df[col_name].to_list(), dtype=torch.float32)
 
         # extract from df
-        pitch_embeddings = col_to_tensor('embeds') # already normalized
+        pitch_embeddings = col_to_tensor('embed') # already normalized
         label = col_to_tensor('swing')
 
         # combined features
@@ -132,7 +132,7 @@ def train(model, dataLoader, valLoader, optimizer, lossFunc, epochs):
     return model
 
 # %% preparing data
-df = pl.scan_parquet('cleaned_data/embed/output/pitch_embeded.parquet').select(['embeds', 'swing']).collect(engine="streaming")
+df = pl.scan_parquet('cleaned_data/embed/output/pitch_umap50.parquet').select(['embed', 'swing']).collect(engine="streaming")
 df = df.drop_nulls()
 
 # %% data 
@@ -164,7 +164,7 @@ torch.cuda.empty_cache()
 
 # %% model train
 model = train(model=model, dataLoader=train_loader, valLoader=val_loader, optimizer=opti, 
-            lossFunc=loss, epochs=20)
+            lossFunc=loss, epochs=8)
 
 # %% testing
 def test(model, testLoader):
@@ -192,7 +192,6 @@ def test(model, testLoader):
 
 # %% load and test
 stateDict = torch.load('../models/swingModel.pth')
-model 
 model.load_state_dict(stateDict)
 model.to('cuda')
 predictions, labels = test(model, test_loader)
@@ -200,3 +199,13 @@ predictions, labels = test(model, test_loader)
 print(accuracy_score(labels, predictions > 0.5))
 print(f1_score(labels, predictions > 0.5))
 print(roc_auc_score(labels, predictions))
+#k15
+#0.7380146869061305
+#0.7379458272121807
+#0.8133362724200544
+
+#k50
+#0.7381038406494146
+#0.7305207659401887
+#0.8144617030084979
+
