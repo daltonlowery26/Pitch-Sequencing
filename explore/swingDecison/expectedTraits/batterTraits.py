@@ -14,8 +14,10 @@ os.chdir('C:/Users/dalto/OneDrive/Pictures/Documents/Projects/Coding Projects/Op
 
 # add game date
 df = pl.read_parquet('cleaned_data/embed/output/pitch_umap150.parquet')
-swing = pl.scan_csv('cleaned_data/pitch_2015_2026.csv').select(['game_pk', 'batter_id', 'pitcher_id', 'at_bat_number', 'pitch_number', 'count', 'game_date', 'game_year']).collect(engine="streaming")
-df = df.join(swing, on=['game_pk', 'batter_id', 'pitcher_id', 'at_bat_number', 'pitch_number', 'count'], validate='1:1' ,how='left')
+swing = pl.scan_csv('cleaned_data/pitch_2015_2026.csv').select(['game_pk', 'batter_id', 
+    'pitcher_id', 'at_bat_number', 'pitch_number', 'count', 'game_date', 'game_year']).collect(engine="streaming")
+df = df.join(swing, on=['game_pk', 'batter_id', 'pitcher_id', 
+    'at_bat_number', 'pitch_number', 'count'], validate='1:1' ,how='left')
 
 # %% random fourier features for linear pitch embeddings, decompse embeddings into waves
 def rff_embeds(embeddings, dim=64):
@@ -36,16 +38,16 @@ def rff_embeds(embeddings, dim=64):
     return rffEmbed
 
 # %% E[Swing Traits| Previous Swings, Pitch]
-def swing_model(embeddings, swings, batter_idx, n_batters, n_obs, n_traits=5, n_basis=64, batch_size=512):
+def swing_model(embeddings, swings, batter_idx, n_batters, n_obs, batch_size, n_traits=5, n_basis=64):
     # global expecation
     global_mu = npro.sample("global_mu", dist.Normal(0.0, 1.0).expand([n_traits]))
     
     # varience between batters
-    sigma_batters = npro.sample("sigma_batters", dist.Exponential(1.0))
+    sigma_batters = npro.sample("sigma_batters", dist.Exponential(0.2))
     
     # batter offset from global expecation
     with npro.plate("batters_plate", n_batters):
-        mu_offset = npro.sample("mu_offset", dist.Normal(0.0, 1.0).expand([n_traits]).to_event(1))
+        mu_offset = npro.sample("mu_offset", dist.StudentT(df=5, loc=0.0, scale=1.0).expand([n_traits]).to_event(1))
     
     # batter expecation
     mu_b = npro.deterministic("mu_b", global_mu + (mu_offset * sigma_batters))
@@ -75,7 +77,7 @@ def trainModel(embeddings, swings, batter_idx, n_batters):
     # append expecation for each swing
     expectations = np.zeros_like(swings, dtype=np.float32)
     # splits
-    kf = KFold(n_splits=10, shuffle=True, random_state=42)
+    kf = KFold(n_splits=10, shuffle=False)
     
     for fold, (trainIdx, testIdx) in enumerate(kf.split(batter_idx)):
         # train folds
@@ -95,7 +97,7 @@ def trainModel(embeddings, swings, batter_idx, n_batters):
         svi = SVI(swing_model, guide, optimizer, loss=Trace_ELBO())
         rng_key_train, rng_key_pred = jax.random.split(jax.random.PRNGKey(fold), 2)
                 
-        svi_result = svi.run(rng_key_train, 3000,
+        svi_result = svi.run(rng_key_train, 15000,
                                 embeddings=tEmbeddings,
                                 swings=tSwings,
                                 batter_idx=tBatterIdx,
@@ -107,7 +109,7 @@ def trainModel(embeddings, swings, batter_idx, n_batters):
         predictive = Predictive(model=swing_model,
                                 guide=guide,
                                 params=params,
-                                num_samples=1000,
+                                num_samples=250,
                                 return_sites=["mu_traits"]) 
         
         predictions = predictive(rng_key_pred,
@@ -115,7 +117,9 @@ def trainModel(embeddings, swings, batter_idx, n_batters):
                                     swings=None,
                                     batter_idx= iBatterIdx,
                                     n_obs=iObs,
-                                    n_batters=n_batters)
+                                    n_batters=n_batters,
+                                    batch_size = len(iEmbeddings)
+        )
         
         foldExp = predictions["mu_traits"].mean(axis=0)
         
@@ -132,7 +136,7 @@ df_s = df_s.drop_nulls(subset=['uYearID'])
 df_s = df_s.sort(['game_date', 'at_bat_number'])
 # zscore
 df_s = df_s.with_columns((pl.col(swing_features) - pl.col(swing_features).mean())/ pl.col(swing_features).std())
-
+print(df_s.height)
 # %% traits for model
 df_s = df_s.with_columns(uYearID_idx = pl.col('uYearID').cast(pl.Categorical).to_physical())
 traits = df_s[swing_features].to_numpy()
@@ -146,3 +150,28 @@ q_embeds, r_embeds = np.linalg.qr(rffEmbeds, mode='reduced')
 # %% model fit and predict
 outCome = trainModel(embeddings=q_embeds, swings=traits, batter_idx=b_idx, n_batters=num_batters)
 
+# %%
+schema = ['bat_speed', 'swing_length', 'swing_path_tilt', 'attack_angle', 'attack_direction']
+actualizedTraits = pl.DataFrame(outCome, schema=schema)
+
+# inverse zscore
+actualizedTraits = actualizedTraits.with_columns(
+    bat_speed = pl.col('bat_speed') * df['bat_speed'].std() + df['bat_speed'].mean(),
+    swing_length = pl.col('swing_length') * df['swing_length'].std() + df['swing_length'].mean(),
+    swing_path_tilt = pl.col('swing_path_tilt') * df['swing_path_tilt'].std() + df['swing_path_tilt'].mean(),
+    attack_angle = pl.col('attack_angle') * df['attack_angle'].std() + df['attack_angle'].mean(),
+    attack_direction = pl.col('attack_direction') * df['attack_direction'].std() + df['attack_direction'].mean(),
+)
+
+# %%
+cmb = df.drop_nulls(subset=swing_features)
+cmb = cmb.with_columns(uYearID = pl.col('batter_id').cast(pl.String) + "_" + pl.col('game_year').cast(pl.String))
+cmb = cmb.drop_nulls(subset=['uYearID'])
+cmb = cmb.sort(['game_date', 'at_bat_number'])
+actualizedTraits = actualizedTraits.select(pl.all().name.suffix('_x'))
+combined = pl.concat([cmb, actualizedTraits], how='horizontal')
+print(combined)
+
+# %%
+player = combined.filter(pl.col('batter_name') == 'Arraez, Luis').select(['bat_speed', 'bat_speed_x']).mean()
+print(player)

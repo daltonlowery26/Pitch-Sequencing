@@ -131,10 +131,11 @@ def trainModel(embeddings, swings, batter_idx, n_batters):
                                     num_obs=iObs,
                                     n_batters=n_batters)
         
-        foldExp = predictions["mu"].mean(axis=0)
+        foldExp = predictions["obs"].mean(axis=0)
         
         expectations[testIdx] = foldExp
     return expectations
+
 # %% prepare
 df = df.with_columns(
     uYearID = pl.col('batter_id').cast(pl.String) + "_" + pl.col('game_year').cast(pl.String)
@@ -160,4 +161,28 @@ embeds = df['embed'].to_numpy()
 rffEmbeddings = rff_embeds(embeds)
 q_embeds, r_embeds = np.linalg.qr(rffEmbeddings, mode='reduced')
 r_inv = np.linalg.inv(r_embeds)
+
+# %%
+outCome = trainModel(embeddings=q_embeds, swings=sample, batter_idx=batID, n_batters=len(np.unique(batID)))
+
+# %% 
+schema = ['bat_speed', 'swing_length', 'swing_path_tilt', 'attack_angle', 'attack_direction']
+actualizedTraits = pl.DataFrame(outCome, schema=schema)
+
+actualizedTraits = actualizedTraits.with_columns(
+    bat_speed = pl.col('bat_speed') * df['bat_speed'].std() + df['bat_speed'].mean(),
+    swing_length = pl.col('swing_length') * df['swing_length'].std() + df['swing_length'].mean(),
+    swing_path_tilt = pl.col('swing_path_tilt') * df['swing_path_tilt'].std() + df['swing_path_tilt'].mean(),
+    attack_angle = pl.col('attack_angle') * df['attack_angle'].std() + df['attack_angle'].mean(),
+    attack_direction = pl.col('attack_direction') * df['attack_direction'].std() + df['attack_direction'].mean(),
+)
+
+# %%
+cmb = df.drop_nulls(subset=swing_features)
+cmb = cmb.with_columns(uYearID = pl.col('batter_id').cast(pl.String) + "_" + pl.col('game_year').cast(pl.String))
+cmb = cmb.drop_nulls(subset=['uYearID'])
+cmb = cmb.sort(['game_date', 'at_bat_number'])
+actualizedTraits = actualizedTraits.select(pl.all().name.suffix('_x'))
+combined = pl.concat([cmb, actualizedTraits], how='horizontal')
+print(combined)
 
