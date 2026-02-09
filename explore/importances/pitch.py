@@ -5,6 +5,7 @@ import numpy as np
 import polars as pl
 import xgboost as xgb
 from sklearn.model_selection import PredefinedSplit, RandomizedSearchCV, train_test_split
+from scipy.stats import randint, uniform, loguniform
 os.chdir("C:/Users/dalto/OneDrive/Pictures/Documents/Projects/Coding Projects/Optimal Pitch/data/")
 df = pl.scan_parquet('cleaned_data/embed/pitch.parquet').select('hra', 'vra', 'release_speed', 'release_extension', 'arm_angle', 'release_height',
             'release_x', 'deltax', 'deltaz', 'midx', 'midz', 'ay', 'swing')
@@ -21,16 +22,17 @@ def train(X, y, seed):
         x_val, y_val, test_size=0.5, random_state=seed, shuffle=True
     )
     # general space to search
-    rnd_search_params = {
-        "learning_rate": [0.01, 0.001, 0.1],
-        "max_depth": np.linspace(2, 10, 5, dtype=int),
-        "min_child_weight": np.linspace(1, 40, 10, dtype=int),
-        "subsample": np.linspace(0.3, 1, 9),
-        "colsample_bytree": [0.5, .65, 0.75, .9, 1],
-        "n_estimators": np.linspace(100, 10000, 100, dtype=int),
-        "reg_lambda": [1, 3, 5, 10, 20, 25, 35],
+    rnd_params = {
+    "learning_rate": loguniform(0.01, 0.3),
+    "max_depth": randint(3, 9),
+    "min_child_weight": randint(10, 500),
+    "subsample": uniform(0.5, 0.5),
+    "colsample_bytree": uniform(0.5, 0.5),
+    "gamma": uniform(0, 5),
+    "reg_lambda": loguniform(1e-3, 100),
+    "reg_alpha": loguniform(1e-3, 100),
+    "n_estimators": randint(500, 3000)
     }
-
     # predefinied split for early stopping
     x_combined = pl.concat([x_train, x_val2])
     y_combined = pl.concat([y_train, y_val2])
@@ -42,23 +44,23 @@ def train(X, y, seed):
         device="gpu",
         random_state=seed,
         early_stopping_rounds=30,
-        n_jobs=4,
+        n_jobs=-1,
     )
     # random search
     rnd_searcher = RandomizedSearchCV(
         model,
-        param_distributions=rnd_search_params,
+        param_distributions=rnd_params,
         cv=pds,
         scoring="neg_log_loss",
         n_iter=50,
         random_state=seed,
-        verbose=1,
-        n_jobs=4,
+        verbose=10,
+        n_jobs=-1,
     )
     # eval set, not verbose
     fit_params_xgb = {
         "eval_set": [(x_val, y_val)],
-        "verbose": False,
+        "verbose": False
     }
 
     # search and extract best params

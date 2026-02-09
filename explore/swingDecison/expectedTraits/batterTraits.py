@@ -43,11 +43,11 @@ def swing_model(embeddings, swings, batter_idx, n_batters, n_obs, batch_size, n_
     global_mu = npro.sample("global_mu", dist.Normal(0.0, 1.0).expand([n_traits]))
     
     # varience between batters
-    sigma_batters = npro.sample("sigma_batters", dist.Exponential(0.2))
+    sigma_batters = npro.sample("sigma_batters", dist.Exponential(0.5))
     
     # batter offset from global expecation
     with npro.plate("batters_plate", n_batters):
-        mu_offset = npro.sample("mu_offset", dist.StudentT(df=5, loc=0.0, scale=1.0).expand([n_traits]).to_event(1))
+        mu_offset = npro.sample("mu_offset", dist.StudentT(df=2, loc=0.0, scale=1.0).expand([n_traits]).to_event(1))
     
     # batter expecation
     mu_b = npro.deterministic("mu_b", global_mu + (mu_offset * sigma_batters))
@@ -77,7 +77,7 @@ def trainModel(embeddings, swings, batter_idx, n_batters):
     # append expecation for each swing
     expectations = np.zeros_like(swings, dtype=np.float32)
     # splits
-    kf = KFold(n_splits=10, shuffle=False)
+    kf = KFold(n_splits=20, shuffle=True, random_state=26)
     
     for fold, (trainIdx, testIdx) in enumerate(kf.split(batter_idx)):
         # train folds
@@ -173,5 +173,7 @@ combined = pl.concat([cmb, actualizedTraits], how='horizontal')
 print(combined)
 
 # %%
-player = combined.filter(pl.col('batter_name') == 'Arraez, Luis').select(['bat_speed', 'bat_speed_x']).mean()
+player = combined.filter(pl.col('batter_name') == 'Cruz, Oneil').select(['bat_speed', 'bat_speed_x']).mean()
 print(player)
+# %%
+combined.write_parquet('cleaned_data/metrics/xswing/swingTraits.parquet')
