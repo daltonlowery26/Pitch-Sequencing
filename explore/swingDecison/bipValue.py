@@ -5,6 +5,7 @@ import polars as pl
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader, random_split
+from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
 os.chdir('C:/Users/dalto/OneDrive/Pictures/Documents/Projects/Coding Projects/Optimal Pitch/data/')
 
 # %% model and train blocks
@@ -34,12 +35,12 @@ class bipModel(nn.Module):
             resBlock(hidden, 0.2) for _ in range(layer1)
         ])
         # swingTraits
-        self.sInput = nn.Linear(5, hidden)
+        self.sInput = nn.Linear(7, hidden)
         self.sBlock = nn.ModuleList([
             resBlock(hidden, 0.2) for _ in range(layer2)
         ])
         # output
-        self.combine = nn.Linear(hidden * 2, hidden)
+        self.combine = nn.Linear((hidden * 2), hidden)
         self.backBone = nn.ModuleList([
             resBlock(hidden, 0.2) for _ in range(layer3)
         ]) 
@@ -59,7 +60,7 @@ class bipModel(nn.Module):
             swing = block(swing)
         
         # combine
-        combined = torch.cat([swing, embeds], dim=0)
+        combined = torch.cat([swing, embeds], dim=1)
         combined = self.combine(combined)
         for block in self.backBone:
             combined = block(combined)
@@ -72,15 +73,15 @@ class bipDataset(Dataset):
         super(bipDataset, self).__init__()
         
         # helper function
-        embeddings = torch.tensor(df['embed'], dtype=torch.float32).to('cuda')
-        swingTraits = torch.tensor(df['traits'].to_list(), dtype=torch.float16)
+        embeddings = torch.tensor(df['embed'].to_list(), dtype=torch.float32).to('cuda')
+        swingTraits = torch.tensor(df['traits'].to_list(), dtype=torch.float32)
         
         mean = swingTraits.mean(dim=0)
         std = swingTraits.std(dim=0)
         traits = (swingTraits - mean) / std
         traits = traits.to('cuda')
         
-        label = torch.tensor(df['outcome'].to_list(), dtype=torch.int8).to('cuda')
+        label = torch.tensor(df['outcome'].to_list(), dtype=torch.long).to('cuda')
         self.e = embeddings
         self.t = traits
         self.l = label
@@ -110,7 +111,7 @@ def train(model, dataLoader, valLoader, optimizer, lossFunc, epochs):
             optimizer.zero_grad()
             # model pass
             predicted = model(batchFeat["embeds"], batchFeat['traits'])
-            labels = batchFeat['labels'].reshape(-1, 1)
+            labels = batchFeat['labels'].view(-1)
             # loss function
             loss = lossFunc(predicted, labels)
             # opti step
@@ -132,7 +133,7 @@ def train(model, dataLoader, valLoader, optimizer, lossFunc, epochs):
                     valFeat[key] = value.to('cuda')
                 # model pass
                 predicted = model(valFeat["embeds"], valFeat["traits"])
-                labels = valFeat['labels'].reshape(-1, 1)
+                labels = valFeat['labels'].view(-1)
                 # loss function
                 loss = lossFunc(predicted, labels)
                 # add loss value
@@ -166,7 +167,7 @@ df = df.with_columns(
 
 # final check (should only drop one row)
 df = df.drop_nulls(subset=['bat_speed', 'swing_length', 'swing_path_tilt', 'attack_angle', 
-                            'attack_direction','intercept_x', 'intercept_y', 'embed'])
+                            'attack_direction','intercept_x', 'intercept_y', 'embed', 'events'])
 
 # %% data loading and splitting
 dataset = bipDataset(df)
@@ -185,11 +186,44 @@ test_loader = DataLoader(test_dataset, batch_size=512, shuffle=False)
 
 # loss, model, opti
 loss = nn.CrossEntropyLoss()
-model = bipModel(hidden=256, layer1=5, layer2=2, layer3=6, outputs=5)
-opti = torch.optim.AdamW(model.parameters(), weight_decay=0.001)
+model = bipModel(hidden=512, layer1=10, layer2=2, layer3=6, outputs=5)
+opti = torch.optim.AdamW(model.parameters(), lr=0.001, weight_decay=0.001)
+sum(p.numel() for p in model.parameters())
 
 # %% train model
 lastModel = train(model, dataLoader=train_loader, valLoader=val_loader, optimizer=opti, lossFunc=loss, epochs=10)
 
+# %% testing
+def test(model, testLoader):
+    model.eval()
+    gLabels = []
+    gPreds = []
+    
+    for batchIdx, batchFeat in enumerate(testLoader):
+        # to cuda
+        for k, v in batchFeat.items():
+            batchFeat[k] = v.to('cuda')
+    
+        predictions = model(batchFeat["embeds"], batchFeat["traits"])
+        labels = batchFeat['labels'].view(-1)
+        predictions = torch.argmax(predictions, dim=1)
+        
+        labels = labels.cpu().detach().numpy()
+        predictions = predictions.cpu().detach().numpy()
+        gLabels.append(labels)
+        gPreds.append(predictions)
 
-# %% validate model
+    all_predictions = np.concatenate(gPreds)
+    all_labels = np.concatenate(gLabels)
+    return all_predictions, all_labels
+
+# %% load and test
+stateDict = torch.load('../models/sdModels/bipModel.pth')
+model = bipModel(hidden=512, layer1=10, layer2=2, layer3=6, outputs=5)
+model.load_state_dict(stateDict)
+model.to('cuda')
+predictions, labels = test(model, test_loader)
+
+
+print(accuracy_score(labels, predictions))
+print(f1_score(labels, predictions, average='weighted'))
