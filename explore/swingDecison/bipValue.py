@@ -4,7 +4,8 @@ import numpy as np
 import polars as pl
 import torch
 import torch.nn as nn
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, random_split
+os.chdir('C:/Users/dalto/OneDrive/Pictures/Documents/Projects/Coding Projects/Optimal Pitch/data/')
 
 # %% model and train blocks
 class resBlock(nn.Module):
@@ -25,21 +26,22 @@ class resBlock(nn.Module):
         return x + self.block(x)
 
 class bipModel(nn.Module):
-    def __init__(self, embedding, swingTraits, hidden, layers, outputs):
+    def __init__(self, hidden, layer1, layer2, layer3, outputs):
+        super(bipModel, self).__init__()
         # embeddings
         self.eInput = nn.Linear(64, hidden)
         self.eBlock = nn.ModuleList([
-            resBlock(hidden, 0.2) for _ in range(layers)
+            resBlock(hidden, 0.2) for _ in range(layer1)
         ])
         # swingTraits
         self.sInput = nn.Linear(5, hidden)
         self.sBlock = nn.ModuleList([
-            resBlock(hidden, 0.2) for _ in range(layers)
+            resBlock(hidden, 0.2) for _ in range(layer2)
         ])
         # output
         self.combine = nn.Linear(hidden * 2, hidden)
         self.backBone = nn.ModuleList([
-            resBlock(hidden, 0.2) for _ in range(layers)
+            resBlock(hidden, 0.2) for _ in range(layer3)
         ]) 
         
         # classification
@@ -66,18 +68,22 @@ class bipModel(nn.Module):
         return self.fLinear(combined)
 
 class bipDataset(Dataset):
-    def __init__(self, df, embeddings, timing):
+    def __init__(self, df):
+        super(bipDataset, self).__init__()
+        
         # helper function
-        embeddings = torch.tensor(df['embeds'].to_list()).to('cuda')
-        swingTraits = df['traits']
+        embeddings = torch.tensor(df['embed'], dtype=torch.float32).to('cuda')
+        swingTraits = torch.tensor(df['traits'].to_list(), dtype=torch.float16)
         
         mean = swingTraits.mean(dim=0)
         std = swingTraits.std(dim=0)
         traits = (swingTraits - mean) / std
-        zTraits = torch.tensor(traits.to_list()).to('cuda')
+        traits = traits.to('cuda')
         
+        label = torch.tensor(df['outcome'].to_list(), dtype=torch.int8).to('cuda')
         self.e = embeddings
-        self.s = zTraits
+        self.t = traits
+        self.l = label
     
     def __len__(self):
         return len(self.e)
@@ -85,8 +91,9 @@ class bipDataset(Dataset):
     # return indices and hold dataset on gpu
     def __getitem__(self, idx):
         return {
-            'embed': self.e[idx],
-            'swing': self.s[idx]
+            'embeds': self.e[idx],
+            'traits': self.t[idx],
+            'labels': self.l[idx]
         }
 
 def train(model, dataLoader, valLoader, optimizer, lossFunc, epochs):
@@ -136,8 +143,53 @@ def train(model, dataLoader, valLoader, optimizer, lossFunc, epochs):
         # save best model
         if avg_val_loss < best_loss:
             best_loss = avg_val_loss
-            torch.save(model.state_dict(), '../models/swingModel.pth')
+            torch.save(model.state_dict(), '../models/bipModel.pth')
         print(f'epoch: {epoch}, valLoss: {avg_val_loss}, trainLoss: {train_loss}')
     return model
 
-# %% model prep
+# %% data prep
+df = pl.read_parquet('cleaned_data/metrics/xswing/xtraitContact.parquet')
+df = df.with_columns(
+    traits = pl.concat_arr(['bat_speed', 'swing_length', 'swing_path_tilt', 'attack_angle', 'attack_direction','intercept_x', 'intercept_y'])
+)
+des = ["hit_into_play"]
+df = df.filter(pl.col('description').is_in(des))
+
+# add events, catagories
+swing = pl.scan_csv('cleaned_data/pitch_2015_2026.csv').select(['game_pk', 'batter_id', 'pitcher_id', 'at_bat_number', 'pitch_number', 'count', 'events']).collect(engine="streaming")
+df = df.join(swing, on=['game_pk', 'batter_id', 'pitcher_id', 'at_bat_number', 'pitch_number', 'count'], validate='1:1' ,how='left')
+df = df.filter(pl.col('events') != 'catcher_interf')
+eventsMap = {'single':0,'double':1,'triple':2, 'home_run':3}
+df = df.with_columns(
+    outcome=(pl.col("events").replace_strict(eventsMap, default=4)).cast(pl.Int8)
+)
+
+# final check (should only drop one row)
+df = df.drop_nulls(subset=['bat_speed', 'swing_length', 'swing_path_tilt', 'attack_angle', 
+                            'attack_direction','intercept_x', 'intercept_y', 'embed'])
+
+# %% data loading and splitting
+dataset = bipDataset(df)
+train_size = int(0.8 * len(dataset))
+val_size = int(0.1 * len(dataset))
+test_size = len(dataset) - train_size - val_size
+train_dataset, val_dataset, test_dataset = random_split(
+    dataset,
+    [train_size, val_size, test_size],
+    generator=torch.Generator().manual_seed(26)
+)
+
+train_loader = DataLoader(train_dataset, batch_size=512, shuffle=True)
+val_loader = DataLoader(val_dataset, batch_size=512, shuffle=False)
+test_loader = DataLoader(test_dataset, batch_size=512, shuffle=False)
+
+# loss, model, opti
+loss = nn.CrossEntropyLoss()
+model = bipModel(hidden=256, layer1=5, layer2=2, layer3=6, outputs=5)
+opti = torch.optim.AdamW(model.parameters(), weight_decay=0.001)
+
+# %% train model
+lastModel = train(model, dataLoader=train_loader, valLoader=val_loader, optimizer=opti, lossFunc=loss, epochs=10)
+
+
+# %% validate model

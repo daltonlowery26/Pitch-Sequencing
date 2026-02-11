@@ -12,11 +12,6 @@ os.chdir('C:/Users/dalto/OneDrive/Pictures/Documents/Projects/Coding Projects/Op
 # load and select data
 swing_features = ['bat_speed', 'swing_length', 'swing_path_tilt', 'attack_angle', 'attack_direction', 'embed']
 df = (pl.scan_parquet('cleaned_data/embed/output/pitch_umap150.parquet').drop_nulls(subset=swing_features)).collect(engine="streaming")
-xswing = pl.read_parquet('cleaned_data/metrics/xswing/swingTraits.parquet')
-xswing = xswing.select(pl.all().name.suffix('_x'))
-
-# %% only registered swings
-df = pl.concat([df, xswing], how='horizontal')
 
 # %% general res block
 class resBlock(nn.Module):
@@ -198,21 +193,20 @@ def normStats(trainloader):
     # mean
     mean = g_sum / n_samples
     # std dev
-    variance = ((g_sq_sum / n_samples) - (mean ** 2))
-    std = torch.sqrt(variance)
+    var = ((g_sq_sum / n_samples) - (mean ** 2))
+    std = torch.sqrt(var)
 
     return mean, std
 
 # %% preparing data
 df_s = df.filter(pl.col('swing'))
 df_s = df_s.with_columns(contact = ((pl.col('description') == 'swinging_strike_blocked') | ((pl.col('description') == 'swinging_strike') )).cast(pl.Int16))
-swing_traits = ['bat_speed_x', 'swing_length_x', 'swing_path_tilt_x', 'attack_angle_x', 'attack_direction_x']
-df_contact_train = df_s.select(['bat_speed_x', 'swing_length_x', 'swing_path_tilt_x', 'attack_angle_x', 'attack_direction_x', 'contact', 'embed'])
+swing_traits = ['bat_speed', 'swing_length', 'swing_path_tilt', 'attack_angle', 'attack_direction']
+df_contact_train = df_s.select(['bat_speed', 'swing_length', 'swing_path_tilt', 'attack_angle', 'attack_direction', 'contact', 'embed'])
 df_contact_train = df_contact_train.with_columns(traits = pl.concat_list(swing_traits))
 
 # dataset
 contactData = contactDataset(df_contact_train)
-
 train_size = int(0.8 * len(contactData))
 val_size = int(0.1 * len(contactData))
 test_size = len(contactData) - train_size - val_size
