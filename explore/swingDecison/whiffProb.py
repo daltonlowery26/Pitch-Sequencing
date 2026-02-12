@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader, random_split
 from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
-os.chdir('C:/Users/dalto/OneDrive/Pictures/Documents/Projects/Coding Projects/Optimal Pitch/data')
+os.chdir('/Users/daltonlowery/Desktop/projects/Optimal Pitch/data')
 
 # load and select data
 swing_features = ['bat_speed', 'swing_length', 'swing_path_tilt', 'attack_angle', 'attack_direction', 'embed']

@@ -7,8 +7,7 @@ import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader, random_split
 from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
 import os
-os.chdir('C:/Users/dalto/OneDrive/Pictures/Documents/Projects/Coding Projects/Optimal Pitch/data')
-
+os.chdir('/Users/daltonlowery/Desktop/projects/Optimal Pitch/data')
 # %% general res block
 class resBlock(nn.Module):
     def __init__(self, dim, dropout):
@@ -79,7 +78,7 @@ class takeDataset(Dataset):
         }
 
 def train(model, dataLoader, valLoader, optimizer, lossFunc, epochs):
-    model.to('cuda')
+    model.to('mps')
     best_loss = np.inf
     for epoch in range(epochs):
         total_loss = 0.0
@@ -87,7 +86,7 @@ def train(model, dataLoader, valLoader, optimizer, lossFunc, epochs):
         for batchIdx, batchFeat in enumerate(dataLoader):
             # all feature in the batch to device
             for key, value in batchFeat.items():
-                batchFeat[key] = value.to('cuda')
+                batchFeat[key] = value.to('mps')
             # zero the gradient accumilation
             optimizer.zero_grad()
             # model pass
@@ -112,7 +111,7 @@ def train(model, dataLoader, valLoader, optimizer, lossFunc, epochs):
             for valIdx, valFeat in enumerate(valLoader):
                 # all feature in the batch to device
                 for key, value in valFeat.items():
-                    valFeat[key] = value.to('cuda')
+                    valFeat[key] = value.to('mps')
                 # model pass
                 predicted = model(valFeat["embeds"])
                 labels = valFeat['labels'].reshape(-1, 1)
@@ -160,7 +159,7 @@ sum(p.numel() for p in model.parameters())
 
 # %% mem chache
 gc.collect()
-torch.cuda.empty_cache()
+torch.mps.empty_cache()
 
 # %% model train
 model = train(model=model, dataLoader=train_loader, valLoader=val_loader, optimizer=opti, 
@@ -173,9 +172,9 @@ def test(model, testLoader):
     gPreds = []
     
     for batchIdx, batchFeat in enumerate(testLoader):
-        # to cuda
+        # to mps
         for k, v in batchFeat.items():
-            batchFeat[k] = v.to('cuda')
+            batchFeat[k] = v.to('mps')
 
     
         predictions = model(batchFeat["embeds"])
@@ -193,7 +192,7 @@ def test(model, testLoader):
 # %% load and test
 stateDict = torch.load('../models/swingModel.pth')
 model.load_state_dict(stateDict)
-model.to('cuda')
+model.to('mps')
 predictions, labels = test(model, test_loader)
 
 print(accuracy_score(labels, predictions > 0.5))
