@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader, random_split
 from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
-os.chdir('/Users/daltonlowery/Desktop/projects/Optimal Pitch/data')
+os.chdir('C:/Users/dalto/OneDrive/Pictures/Documents/Projects/Coding Projects/Optimal Pitch/data/')
 
 # %% model and train blocks
 class resBlock(nn.Module):
@@ -73,15 +73,15 @@ class bipDataset(Dataset):
         super(bipDataset, self).__init__()
         
         # helper function
-        embeddings = torch.tensor(df['embed'].to_list(), dtype=torch.float32).to('mps')
+        embeddings = torch.tensor(df['embed'].to_list(), dtype=torch.float32).to('cuda')
         swingTraits = torch.tensor(df['traits'].to_list(), dtype=torch.float32)
         
         mean = swingTraits.mean(dim=0)
         std = swingTraits.std(dim=0)
         traits = (swingTraits - mean) / std
-        traits = traits.to('mps')
+        traits = traits.to('cuda')
         
-        label = torch.tensor(df['outcome'].to_list(), dtype=torch.long).to('mps')
+        label = torch.tensor(df['outcome'].to_list(), dtype=torch.long).to('cuda')
         self.e = embeddings
         self.t = traits
         self.l = label
@@ -98,7 +98,7 @@ class bipDataset(Dataset):
         }
 
 def train(model, dataLoader, valLoader, optimizer, lossFunc, epochs):
-    model.to('mps')
+    model.to('cuda')
     best_loss = np.inf
     for epoch in range(epochs):
         total_loss = 0.0
@@ -106,7 +106,7 @@ def train(model, dataLoader, valLoader, optimizer, lossFunc, epochs):
         for batchIdx, batchFeat in enumerate(dataLoader):
             # all feature in the batch to device
             for key, value in batchFeat.items():
-                batchFeat[key] = value.to('mps')
+                batchFeat[key] = value.to('cuda')
             # zero the gradient accumilation
             optimizer.zero_grad()
             # model pass
@@ -130,7 +130,7 @@ def train(model, dataLoader, valLoader, optimizer, lossFunc, epochs):
             for valIdx, valFeat in enumerate(valLoader):
                 # all feature in the batch to device
                 for key, value in valFeat.items():
-                    valFeat[key] = value.to('mps')
+                    valFeat[key] = value.to('cuda')
                 # model pass
                 predicted = model(valFeat["embeds"], valFeat["traits"])
                 labels = valFeat['labels'].view(-1)
@@ -200,9 +200,9 @@ def test(model, testLoader):
     gPreds = []
     
     for batchIdx, batchFeat in enumerate(testLoader):
-        # to mps
+        # to cuda
         for k, v in batchFeat.items():
-            batchFeat[k] = v.to('mps')
+            batchFeat[k] = v.to('cuda')
     
         predictions = model(batchFeat["embeds"], batchFeat["traits"])
         labels = batchFeat['labels'].view(-1)
@@ -221,9 +221,9 @@ def test(model, testLoader):
 stateDict = torch.load('../models/sdModels/bipModel.pth')
 model = bipModel(hidden=512, layer1=10, layer2=2, layer3=6, outputs=5)
 model.load_state_dict(stateDict)
-model.to('mps')
+model.to('cuda')
 predictions, labels = test(model, test_loader)
 
 
 print(accuracy_score(labels, predictions))
-print(f1_score(labels, predictions, average='macro'))
+print(f1_score(labels, predictions, average='weighted'))
