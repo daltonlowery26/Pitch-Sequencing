@@ -83,17 +83,6 @@ class contactMLP(nn.Module):
 
         return learned
 
-
-def he_init_weights(m):
-    if isinstance(m, nn.Linear):
-        nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
-        if m.bias is not None:
-            nn.init.constant_(m.bias, 0)
-    elif isinstance(m, nn.BatchNorm1d):
-      nn.init.constant_(m.weight, 1)
-      nn.init.constant_(m.bias, 0)
-
-
 class contactDataset(Dataset):
     def __init__(self, df):
         # cols to tensor
@@ -103,13 +92,17 @@ class contactDataset(Dataset):
         # extract from df
         pitch_embeddings = col_to_tensor('embed') # already normalized
         swing_traits = col_to_tensor('traits')
-        label = col_to_tensor('contact')
+        try:
+            label = col_to_tensor('contact')
+        except Exception:
+            print('No Labels!')
+            label = None
 
         # combined features
         self.traits = swing_traits
         self.embeds = pitch_embeddings
         self.label = label
-
+            
     def __len__(self):
         return len(self.traits)
 
@@ -262,6 +255,34 @@ def test(model, testLoader, mean, std):
     all_predictions = np.concatenate(gPreds)
     all_labels = np.concatenate(gLabels)
     return all_predictions, all_labels
+
+# %% predeciton function
+def contactPredict(df):
+    # load model
+    model = contactMLP(input=6, dim=512, dropout=0.2)
+    stateDict = torch.load('../models/sdModels/contactModel.pth')
+    model.load_state_dict(stateDict)
+    model.to('mps')
+    
+    # dataloader
+    data = contactDataset(df)
+    dataLoad = DataLoader(data, batch_size=512, shuffle=False)
+    
+    # preds
+    preds = []
+    for batchIdx, batchFeat in enumerate(dataLoad):
+        # to mps
+        for k, v in batchFeat.items():
+            batchFeat[k] = v.to('mps')
+
+        # predections
+        predictions = model(batchFeat["embeds"])
+        predictions = torch.sigmoid(predictions)
+        predictions = predictions.cpu().detach().numpy()
+        preds.append(predictions)
+
+    all_predictions = np.concatenate(preds)
+    return all_predictions
 
 # %% load and test
 stateDict = torch.load('../models/contactModel.pth')

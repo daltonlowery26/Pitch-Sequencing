@@ -62,8 +62,12 @@ class takeDataset(Dataset):
 
         # extract from df
         pitch_embeddings = col_to_tensor('embed') # already normalized
-        label = col_to_tensor('swing')
-
+        try:
+            label = col_to_tensor('swing')
+        except Exception:
+            print('no labels!')
+            label = None
+            
         # combined features
         self.embeds = pitch_embeddings
         self.label = label
@@ -188,6 +192,34 @@ def test(model, testLoader):
     all_predictions = np.concatenate(gPreds)
     all_labels = np.concatenate(gLabels)
     return all_predictions, all_labels
+
+# %% predeciton function
+def takePredict(df):
+    # load model
+    model = takeMLP(input=1, dim=512, dropout=0.2, layers=10)
+    stateDict = torch.load('../models/sdModels/swingModel.pth')
+    model.load_state_dict(stateDict)
+    model.to('mps')
+    model.eval()
+    # dataloader
+    data = takeDataset(df)
+    dataLoad = DataLoader(data, batch_size=512)
+    
+    # preds
+    preds = []
+    for batchIdx, batchFeat in enumerate(dataLoad):
+        # to mps
+        for k, v in batchFeat.items():
+            batchFeat[k] = v.to('mps')
+
+        # predections
+        predictions = model(batchFeat["embeds"])
+        predictions = torch.sigmoid(predictions)
+        predictions = predictions.cpu().detach().numpy()
+        preds.append(predictions)
+
+    all_predictions = np.concatenate(preds)
+    return all_predictions
 
 # %% load and test
 stateDict = torch.load('../models/swingModel.pth')

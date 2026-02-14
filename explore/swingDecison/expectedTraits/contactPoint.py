@@ -1,5 +1,4 @@
 # %% packages
-from xgboost.spark.core import pred
 import os
 import polars as pl
 import numpy as np
